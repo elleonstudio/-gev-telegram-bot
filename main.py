@@ -33,7 +33,7 @@ async def ask_kimi(prompt: str, image_b64: str = None) -> str:
             model = 'moonshot-v1-8k-vision-preview'
         else:
             messages = [
-                {'role': 'system', 'content': 'Ты помощник для бизнеса. Отвечай коротко, только результат, без объяснений.'},
+                {'role': 'system', 'content': 'Ты помощник для бизнеса. Отвечай коротко, только результат.'},
                 {'role': 'user', 'content': prompt}
             ]
             model = 'moonshot-v1-8k'
@@ -54,7 +54,7 @@ async def ask_kimi(prompt: str, image_b64: str = None) -> str:
         if r.status_code == 200:
             return r.json()['choices'][0]['message']['content']
         else:
-            logging.error(f"Kimi error: {r.status_code} - {r.text}")
+            logging.error(f"Kimi error: {r.status_code}")
             return f"Ошибка API: {r.status_code}"
             
     except Exception as e:
@@ -68,7 +68,7 @@ async def ocr_pdf(file_bytes: BytesIO) -> str:
     import pytesseract
     
     file_bytes.seek(0)
-    images = convert_from_bytes(file_bytes.read(), first_page=1, last_page=3, dpi=200)
+    images = convert_from_bytes(file_bytes.read(), first_page=1, last_page=2, dpi=200)
     
     texts = []
     for i, img in enumerate(images):
@@ -81,69 +81,87 @@ async def ocr_pdf(file_bytes: BytesIO) -> str:
 # ========== ПРОВЕРКА ШТРИХ-КОДОВ ==========
 
 def check_barcodes(text: str) -> dict:
-    """Находит и проверяет штрих-коды в тексте"""
-    # Ищем цифры длиной 8-13 символов (EAN-8, EAN-13, и т.д.)
-    barcodes = re.findall(r'\b\d{8,13}\b', text.replace(' ', '').replace('\n', ''))
+    """Находит штрих-коды в тексте (EAN-8, EAN-13, EAN-14, ITF-14, и т.д.)"""
     
-    # Убираем дубликаты
-    unique_barcodes = list(set(barcodes))
+    # Убираем пробелы и переносы для поиска
+    clean_text = text.replace(' ', '').replace('\n', '').replace('\t', '')
     
-    result = {
-        'found': unique_barcodes,
-        'count': len(unique_barcodes),
-        'by_page': {}
+    # Ищем цифры длиной 8-14 символов (все типы штрих-кодов)
+    # EAN-8 (8), EAN-12 (12), EAN-13 (13), EAN-14 (14), ITF-14 (14)
+    barcodes = re.findall(r'\b\d{8,14}\b', clean_text)
+    
+    # Фильтруем: убираем короткие числа (артикулы обычно 7-9 цифр)
+    # Оставляем только потенциальные штрих-коды (12, 13, 14 цифр)
+    valid_lengths = [12, 13, 14]
+    filtered = [b for b in barcodes if len(b) in valid_lengths]
+    
+    # Убираем дубликаты сохраняя порядок
+    seen = set()
+    unique = []
+    for b in filtered:
+        if b not in seen:
+            seen.add(b)
+            unique.append(b)
+    
+    return {
+        'found': unique,
+        'count': len(unique),
+        'raw': barcodes  # для отладки
     }
-    
-    # Ищем по страницам
-    pages = text.split('--- Страница')
-    for i, page in enumerate(pages[1:], 1):
-        page_barcodes = re.findall(r'\b\d{8,13}\b', page.replace(' ', '').replace('\n', ''))
-        if page_barcodes:
-            result['by_page'][f'Стр {i}'] = list(set(page_barcodes))
-    
-    return result
 
-def validate_barcode(barcode: str) -> bool:
+def validate_ean13(barcode: str) -> bool:
     """Проверка контрольной суммы EAN-13"""
     if len(barcode) != 13:
-        return len(barcode) in [8, 12, 13]  # Допустимые длины
+        return None  # Не EAN-13
     
-    # EAN-13 checksum
-    odd = sum(int(barcode[i]) for i in range(0, 12, 2))
-    even = sum(int(barcode[i]) for i in range(1, 12, 2))
-    checksum = (10 - (odd + even * 3) % 10) % 10
+    try:
+        odd = sum(int(barcode[i]) for i in range(0, 12, 2))
+        even = sum(int(barcode[i]) for i in range(1, 12, 2))
+        checksum = (10 - (odd + even * 3) % 10) % 10
+        return checksum == int(barcode[12])
+    except:
+        return False
+
+def validate_ean14(barcode: str) -> bool:
+    """Проверка контрольной суммы EAN-14 (ITF-14)"""
+    if len(barcode) != 14:
+        return None
     
-    return checksum == int(barcode[12])
+    try:
+        # EAN-14: веса 3 и 1 чередуются с конца
+        total = 0
+        for i, digit in enumerate(reversed(barcode[:-1])):
+            weight = 3 if i % 2 == 0 else 1
+            total += int(digit) * weight
+        
+        checksum = (10 - (total % 10)) % 10
+        return checksum == int(barcode[13])
+    except:
+        return False
 
 # ========== ОБРАБОТЧИКИ ==========
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text('🤖 Отправь PDF/фото с заданием')
+    await update.message.reply_text('🤖 Отправь PDF/фото')
 
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text
     
     if text.startswith('http'):
         await update.message.reply_text('🌐 Загружаю...')
-        try:
-            soup = BeautifulSoup(requests.get(text, headers={'User-Agent': 'Mozilla/5.0'}, timeout=10).text, 'html.parser')
-            for tag in soup(['script', 'style']): tag.decompose()
-            content = soup.get_text(separator='\n', strip=True)[:3000]
-            
-            prompt = f"Краткое содержание:\n\n{content}\n\n3-5 пунктов:"
-            resp = await ask_kimi(prompt)
-            await update.message.reply_text(resp[:4000])
-        except Exception as e:
-            await update.message.reply_text(f'❌ Ошибка: {e}')
-    else:
-        prompt = f"{text}\n\nКоротко:"
+        soup = BeautifulSoup(requests.get(text, headers={'User-Agent': 'Mozilla/5.0'}, timeout=10).text, 'html.parser')
+        for tag in soup(['script', 'style']): tag.decompose()
+        content = soup.get_text(separator='\n', strip=True)[:3000]
+        
+        prompt = f"Кратко:\n\n{content}"
         resp = await ask_kimi(prompt)
+        await update.message.reply_text(resp[:4000])
+    else:
+        resp = await ask_kimi(text)
         await update.message.reply_text(resp[:4000])
 
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
-        await update.message.reply_text('📷 Обработка...')
-        
         photo = update.message.photo[-1]
         file = await context.bot.get_file(photo.file_id)
         
@@ -154,9 +172,7 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         b64 = base64.b64encode(buf.read()).decode()
         caption = update.message.caption or "Опиши"
         
-        prompt = f"{caption}\n\nКоротко, факты:"
-        resp = await ask_kimi(prompt, b64)
-        
+        resp = await ask_kimi(f"{caption}\n\nКоротко:", b64)
         await update.message.reply_text(resp[:4000])
     except Exception as e:
         await update.message.reply_text(f'❌ Ошибка: {e}')
@@ -185,7 +201,6 @@ async def handle_doc(update: Update, context: ContextTypes.DEFAULT_TYPE):
             
         # PDF
         elif name.endswith('.pdf'):
-            # Текстовый слой
             try:
                 import PyPDF2
                 reader = PyPDF2.PdfReader(buf)
@@ -193,7 +208,6 @@ async def handle_doc(update: Update, context: ContextTypes.DEFAULT_TYPE):
             except:
                 pass
             
-            # OCR
             if len(text.strip()) < 50:
                 await update.message.reply_text('🔍 OCR...')
                 text = await ocr_pdf(buf)
@@ -207,47 +221,58 @@ async def handle_doc(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         # Проверка штрих-кодов
         barcode_info = check_barcodes(text)
+        logging.info(f"Найдены штрих-коды: {barcode_info}")
         
-        # Формируем промпт
-        caption = update.message.caption or "Проанализируй документ"
+        # Формируем список для промпта
+        if barcode_info['found']:
+            barcode_str = ', '.join(barcode_info['found'])
+        else:
+            barcode_str = "НЕ НАЙДЕНЫ"
         
-        barcode_list = ', '.join(barcode_info['found']) if barcode_info['found'] else 'НЕ НАЙДЕНЫ'
+        caption = update.message.caption or "Проанализируй"
         
         prompt = f"""ЗАДАЧА: {caption}
 
-ТЕКСТ:
-{text[:2500]}
+ТЕКСТ ДОКУМЕНТА:
+{text[:2000]}
 
-НАЙДЕННЫЕ ШТРИХ-КОДЫ: {barcode_list}
+НАЙДЕННЫЕ ШТРИХ-КОДЫ ({barcode_info['count']}): {barcode_str}
 
-ВЫДАЙ РЕЗУЛЬТАТ:
-1. Штрих-коды: перечисли все с проверкой (✅ корректен / ❌ ошибка)
-2. Новое имя файла на китайском-английском с артикулом и штрих-кодом
-3. Размеры: укажи из текста (если есть)
-4. Проверка: что не так, чего не хватает
+ВЫДАЙ:
+1. Штрих-коды: список всех с длиной
+2. Новое имя файла: китайский_английский_артикул_штрихкод.pdf
+3. Размеры: из текста
+4. Чего не хватает
 
-Коротко, без лишних слов."""
+Коротко."""
 
         await update.message.reply_text('🤖 Анализ...')
         resp = await ask_kimi(prompt)
         
-        # Добавляем свою проверку штрих-кодов
-        barcode_check = "\n\n📊 *Проверка штрих-кодов:*\n"
+        # Добавляем свою проверку
+        result = resp + "\n\n📊 *Проверка штрих-кодов:*\n"
+        
         if barcode_info['found']:
             for bc in barcode_info['found']:
-                valid = validate_barcode(bc)
-                barcode_check += f"• `{bc}` {'✅' if valid else '❌'}\n"
+                ean13 = validate_ean13(bc)
+                ean14 = validate_ean14(bc)
+                
+                if ean13 is True:
+                    result += f"• `{bc}` (13) ✅ EAN-13\n"
+                elif ean14 is True:
+                    result += f"• `{bc}` (14) ✅ EAN-14\n"
+                elif ean13 is False or ean14 is False:
+                    result += f"• `{bc}` ({len(bc)}) ❌ Ошибка контрольной суммы\n"
+                else:
+                    result += f"• `{bc}` ({len(bc)}) ⚠️ Неизвестный формат\n"
         else:
-            barcode_check += "• ❌ Не найдены\n"
+            result += "• ❌ Не найдены\n"
         
-        # Итог
-        final = resp + barcode_check
+        # Чистим мусор
+        for bad in ['ОПРЕДЕЛИ', 'ВЫБЕРИ', 'ВЫПОЛНИ', 'ЗАДАЧА:', 'ФОРМАТ:']:
+            result = result.replace(bad, '')
         
-        # Чистим
-        for bad in ['ОПРЕДЕЛИ', 'ВЫБЕРИ', 'ВЫПОЛНИ', '---', 'ЗАДАЧА:', 'ФОРМАТ:', 'ЯЗЫК:']:
-            final = final.replace(bad, '')
-        
-        await update.message.reply_text(final.strip()[:4000])
+        await update.message.reply_text(result.strip()[:4000])
         
     except Exception as e:
         logging.error(f"Doc error: {e}")
