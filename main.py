@@ -106,23 +106,16 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         await update.message.reply_text('⏳ Обработка фото...')
         
-        # Получаем фото (самое большое)
         photo = update.message.photo[-1]
         file = await context.bot.get_file(photo.file_id)
         
         buf = BytesIO()
         await file.download_to_memory(buf)
         
-        # Открываем как изображение
         image = Image.open(buf)
         
-        # Проверяем штрих-код
         barcode_num = await check_barcodes_image(image)
-        
-        # OCR
         text = await ocr_image(image)
-        
-        # Артикул
         article = await extract_article(text)
         
         prompt = f"""Создай имя файла для товара на фото.
@@ -153,7 +146,6 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         new_name = await ask_kimi(prompt)
         
-        # Очистка
         new_name = new_name.strip()
         if not new_name.endswith('.pdf'):
             new_name += '.pdf'
@@ -163,7 +155,6 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if len(new_name) < 10:
             new_name = f"Товар_Unknown_{barcode_num if barcode_num else '000'}.pdf"
         
-        # Формируем ответ
         response_lines = [f"📄 {new_name}"]
         if barcode_num:
             response_lines.insert(0, f"✅ Штрих-код: {barcode_num}")
@@ -174,7 +165,7 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
     except Exception as e:
         logging.error(f"Photo error: {e}")
-        await update.message.reply_text(f'❌ Ошибка обработки фото: {str(e)[:200]}')
+        await update.message.reply_text(f'❌ Ошибка: {str(e)[:200]}')
 
 async def handle_doc(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Обработка документов (PDF)"""
@@ -187,14 +178,12 @@ async def handle_doc(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
         
         if not original_name.lower().endswith('.pdf'):
-            # Если не PDF, пробуем как изображение
             try:
                 file = await context.bot.get_file(doc.file_id)
                 buf = BytesIO()
                 await file.download_to_memory(buf)
                 image = Image.open(buf)
                 
-                # Обрабатываем как фото
                 await update.message.reply_text('⏳ Обработка изображения...')
                 
                 barcode_num = await check_barcodes_image(image)
@@ -230,7 +219,6 @@ async def handle_doc(update: Update, context: ContextTypes.DEFAULT_TYPE):
         buf = BytesIO()
         await file.download_to_memory(buf)
         
-        # Штрих-код из PDF
         from pyzbar.pyzbar import decode
         barcode_num = ""
         for dpi in [300, 200, 150]:
@@ -247,7 +235,6 @@ async def handle_doc(update: Update, context: ContextTypes.DEFAULT_TYPE):
             except:
                 continue
         
-        # OCR
         buf.seek(0)
         images = convert_from_bytes(buf.read(), first_page=1, last_page=1, dpi=200)
         text = ""
@@ -291,7 +278,6 @@ async def handle_doc(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         await update.message.reply_text('\n'.join(response_lines))
         
-        # Отправляем файл
         buf.seek(0)
         await update.message.reply_document(
             document=InputFile(buf, filename=new_name),
