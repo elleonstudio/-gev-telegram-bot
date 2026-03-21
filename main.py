@@ -42,7 +42,7 @@ async def scrape_website(url: str) -> str:
         lines = [line.strip() for line in text.splitlines() if line.strip()]
         text = '\n'.join(lines)
         
-        # Ограничиваем длину для Kimi (макс ~8000 токенов)
+        # Ограничиваем длину для Kimi
         return text[:6000]
         
     except Exception as e:
@@ -106,8 +106,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         'Я умею:\n'
         '📝 Анализировать текст\n'
         '📷 Анализировать фото (Kimi Vision)\n'
-        '📄 Читать документы\n'
-        '🌐 *Заходить на сайты* и анализировать их\n\n'
+        '📄 Читать документы (PDF, TXT)\n'
+        '🌐 Заходить на сайты и анализировать их\n\n'
         'Просто отправьте мне ссылку, фото или текст!',
         parse_mode='Markdown'
     )
@@ -171,7 +171,7 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text('❌ Ошибка при обработке фото')
 
 async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Обработка документов"""
+    """Обработка документов: TXT и PDF"""
     try:
         doc = update.message.document
         await update.message.reply_text(f'📄 Получаю файл: {doc.file_name}...')
@@ -181,13 +181,60 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await file.download_to_memory(file_bytes)
         file_bytes.seek(0)
         
-        # Читаем текстовые файлы
+        content = None
+        
+        # Обработка TXT
         if doc.mime_type == 'text/plain':
-            content = file_bytes.read().decode('utf-8')[:5000]
-            response = await ask_kimi(f"Проанализируй этот документ:\n\n{content}")
+            content = file_bytes.read().decode('utf-8')
+            
+        # Обработка PDF
+        elif doc.file_name.lower().endswith('.pdf') or doc.mime_type == 'application/pdf':
+            try:
+                import PyPDF2
+                pdf_reader = PyPDF2.PdfReader(file_bytes)
+                
+                # Читаем все страницы
+                text_parts = []
+                for page in pdf_reader.pages:
+                    text_parts.append(page.extract_text())
+                
+                content = '\n'.join(text_parts)
+                
+                if not content.strip():
+                    await update.message.reply_text('⚠️ PDF получен, но текст не распознан (возможно, скан/изображение)')
+                    return
+                    
+            except Exception as pdf_error:
+                await update.message.reply_text(f'❌ Ошибка чтения PDF: {str(pdf_error)}')
+                return
+        
+        # Если есть содержимое — отправляем в Kimi
+        if content:
+            # Ограничиваем длину
+            content = content[:5000]
+            
+            # Проверяем, есть ли специальные инструкции в подписи
+            caption = update.message.caption or ""
+            
+            if caption:
+                prompt = f"""Выполни следующие задания по документу:
+{caption}
+
+Содержимое документа:
+{content}
+
+Ответь подробно по-русски."""
+            else:
+                prompt = f"""Проанализируй этот документ и выдели ключевую информацию:
+
+{content}
+
+Ответь по-русски."""
+
+            response = await ask_kimi(prompt)
             await update.message.reply_text(response)
         else:
-            await update.message.reply_text(f'✅ Файл получен ({doc.file_name})\n\nДля анализа отправьте текстовый файл (.txt)')
+            await update.message.reply_text(f'✅ Файл получен ({doc.file_name})\n\nФормат не поддерживается для анализа. Отправьте .txt или .pdf')
             
     except Exception as e:
         logging.error(f"Document error: {e}")
