@@ -2,51 +2,19 @@ import os
 import logging
 import requests
 import base64
+import re
 from io import BytesIO
-from telegram import Update, File
+from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
-from bs4 import BeautifulSoup
-from urllib.parse import urlparse
 
-# Настройка логирования
-logging.basicConfig(
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    level=logging.INFO
-)
+logging.basicConfig(format='%(asctime)s - %(levelname)s - %(message)s', level=logging.INFO)
 
-# Токены
 TELEGRAM_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
 KIMI_API_KEY = os.getenv('KIMI_API_KEY')
 
-# ============ ВЕБ-СКРАПИНГ ============
+# ========== KIMI API ==========
 
-async def scrape_website(url: str) -> str:
-    """Заходит на сайт и извлекает текст"""
-    try:
-        headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.0'
-        }
-        response = requests.get(url, headers=headers, timeout=15)
-        response.raise_for_status()
-        
-        soup = BeautifulSoup(response.text, 'html.parser')
-        
-        for element in soup(['script', 'style', 'nav', 'footer', 'header', 'aside']):
-            element.decompose()
-        
-        text = soup.get_text(separator='\n', strip=True)
-        lines = [line.strip() for line in text.splitlines() if line.strip()]
-        text = '\n'.join(lines)
-        
-        return text[:8000]
-        
-    except Exception as e:
-        logging.error(f"Scraping error: {e}")
-        return None
-
-# ============ KIMI API ============
-
-async def ask_kimi(text: str, image_base64: str = None) -> str:
+async def ask_kimi(prompt: str, image_b64: str = None) -> str:
     """Отправляет запрос в Kimi API"""
     try:
         headers = {
@@ -54,329 +22,257 @@ async def ask_kimi(text: str, image_base64: str = None) -> str:
             'Content-Type': 'application/json'
         }
         
-        messages = [{'role': 'system', 'content': 'You are a universal AI assistant. Understand user intent and provide best possible help.'}]
-        
-        if image_base64:
-            messages.append({
-                'role': 'user',
-                'content': [
-                    {'type': 'text', 'text': text},
-                    {'type': 'image_url', 'image_url': {'url': f'data:image/jpeg;base64,{image_base64}'}}
-                ]
-            })
+        # УЛУЧШЕННОЕ системное сообщение - запрещаем размышления
+        system_msg = '''Ты бизнес-ассистент. ПРАВИЛА:
+1. Отвечай ТОЛЬКО результатом
+2. БЕЗ слов: "ОПРЕДЕЛИ", "ВЫБЕРИ", "ВЫПОЛНИ", "АНАЛИЗИРУЮ", "РАССУЖДАЮ"
+3. БЕЗ вступлений и заключений
+4. Коротко, по делу
+5. Если штрих-коды - проверь и скажи работает/не работает
+6. Если файлы - дай конкретные имена'''
+
+        if image_b64:
+            messages = [
+                {'role': 'system', 'content': system_msg},
+                {
+                    'role': 'user',
+                    'content': [
+                        {'type': 'text', 'text': prompt},
+                        {'type': 'image_url', 'image_url': {'url': f'data:image/jpeg;base64,{image_b64}'}}
+                    ]
+                }
+            ]
             model = 'moonshot-v1-8k-vision-preview'
         else:
-            messages.append({'role': 'user', 'content': text})
+            messages = [
+                {'role': 'system', 'content': system_msg},
+                {'role': 'user', 'content': prompt}
+            ]
             model = 'moonshot-v1-8k'
         
         data = {
             'model': model,
             'messages': messages,
-            'temperature': 0.3
+            'temperature': 0.1,
+            'max_tokens': 1500
         }
         
-        response = requests.post(
+        logging.info(f"Kimi request: {model}")
+        
+        r = requests.post(
             'https://api.moonshot.cn/v1/chat/completions',
             headers=headers,
             json=data,
             timeout=60
         )
         
-        if response.status_code == 200:
-            return response.json()['choices'][0]['message']['content']
+        if r.status_code == 200:
+            result = r.json()
+            text = result['choices'][0]['message']['content']
+            return clean_response(text)
         else:
-            logging.error(f"Kimi API error: {response.status_code} - {response.text}")
-            return f"Ошибка API: {response.status_code}"
+            logging.error(f"Kimi error: {r.text}")
+            return f"Ошибка API: {r.status_code}"
             
     except Exception as e:
-        logging.error(f"Kimi error: {e}")
-        return "Ошибка при обращении к AI"
+        logging.error(f"Kimi exception: {e}")
+        return f"Ошибка: {str(e)}"
 
-# ============ OCR ДЛЯ PDF ============
+def clean_response(text: str) -> str:
+    """Удаляет ненужные слова и форматирование"""
+    garbage = [
+        r'ОПРЕДЕЛИ.*?:', r'ВЫБЕРИ.*?:', r'ВЫПОЛНИ.*?:', r'АНАЛИЗИРУЮ.*?:',
+        r'РАССУЖДАЮ.*?:', r'ДУМАЮ.*?:', r'ПЛАНИРУЮ.*?:',
+        r'---', r'===', r'\*\*\*',
+        r'ВЫВОД:', r'РЕЗУЛЬТАТ:', r'ОТВЕТ:'
+    ]
+    
+    for pattern in garbage:
+        text = re.sub(pattern, '', text, flags=re.IGNORECASE)
+    
+    lines = [line.strip() for line in text.split('\n') if line.strip()]
+    return '\n'.join(lines)
 
-async def extract_pdf_with_ocr(file_bytes: BytesIO, update: Update) -> str:
-    """Извлекает текст из PDF с помощью OCR (для сканов)"""
+# ========== OCR ==========
+
+async def ocr_pdf(file_bytes: BytesIO) -> str:
+    from pdf2image import convert_from_bytes
+    import pytesseract
+    
+    file_bytes.seek(0)
+    images = convert_from_bytes(file_bytes.read(), first_page=1, last_page=2, dpi=150)
+    
+    texts = []
+    for img in images:
+        text = pytesseract.image_to_string(img, lang='rus+eng+chi_sim')
+        if text.strip():
+            texts.append(text.strip())
+    
+    return '\n'.join(texts)
+
+# ========== ПРОВЕРКА ШТРИХ-КОДОВ ==========
+
+async def check_barcodes(file_bytes: BytesIO) -> str:
+    """Проверяет штрих-коды в PDF"""
     try:
         from pdf2image import convert_from_bytes
-        import pytesseract
+        from pyzbar.pyzbar import decode
         
         file_bytes.seek(0)
+        images = convert_from_bytes(file_bytes.read(), dpi=200)
         
-        # Конвертируем PDF в изображения (макс 5 страниц для скорости)
-        await update.message.reply_text('📸 Конвертирую PDF в изображения...')
-        images = convert_from_bytes(file_bytes.read(), first_page=1, last_page=5, dpi=200)
+        results = []
+        for i, img in enumerate(images[:3], 1):
+            codes = decode(img)
+            if codes:
+                for code in codes:
+                    barcode = code.data.decode('utf-8')
+                    results.append(f"Стр {i}: {barcode} ✅")
+            else:
+                results.append(f"Стр {i}: не найден")
         
-        if not images:
-            return None
-        
-        await update.message.reply_text(f'🔍 Распознаю {len(images)} страниц...')
-        
-        ocr_texts = []
-        for i, image in enumerate(images):
-            await update.message.reply_text(f'⏳ OCR страница {i+1}/{len(images)}...')
-            
-            # Распознаем текст (русский + английский)
-            text = pytesseract.image_to_string(image, lang='rus+eng')
-            
-            if text.strip():
-                ocr_texts.append(f"--- Страница {i+1} ---\n{text.strip()}")
-        
-        return '\n\n'.join(ocr_texts)
-        
+        return '\n'.join(results) if results else "Штрих-коды не обнаружены"
     except Exception as e:
-        logging.error(f"OCR error: {e}")
-        raise e
+        return f"Ошибка проверки: {e}"
 
-# ============ УНИВЕРСАЛЬНЫЙ ПРОМПТ ============
-
-def create_universal_prompt(user_request: str, content: str = None, content_type: str = None) -> str:
-    """Универсальный промпт, который адаптируется под любую задачу"""
-    
-    base = f"""ЗАПРОС ПОЛЬЗОВАТЕЛЯ: {user_request}"""
-
-    if content:
-        base += f"""
-
-ИСТОЧНИК ДАННЫХ ({content_type}):
-{content}"""
-
-    base += """
-
-ИНСТРУКЦИИ ДЛЯ AI:
-1. ОПРЕДЕЛИ ЗАДАЧУ: Что именно хочет пользователь?
-   - Анализ данных / Расчёты / Перевод / Проверка / Создание текста / Программирование / Другое
-
-2. ВЫБЕРИ ФОРМАТ ОТВЕТА под задачу:
-   - Таблица — для сравнения, распределения, статистики
-   - Список — для инструкций, планов
-   - Код — для программирования
-   - Текст — для объяснений, анализа
-   - Структурированный ответ — для логистики, отчётов
-
-3. ВЫПОЛНИ ЗАДАЧУ:
-   - Если данные — проанализируй, посчитай, сгруппируй
-   - Если текст — проверь, перепиши, переведи
-   - Если код — напиши, исправь, объясни
-   - Если вопрос — ответь развёрнуто
-
-4. ДОПОЛНИТЕЛЬНО:
-   - Если есть числа — посчитай итоги, разности, проценты
-   - Если есть ошибки — укажи и исправь
-   - Если неясно — задай уточняющий вопрос, но попробуй догадаться
-
-5. ЯЗЫК: Отвечай на языке запроса пользователя (русский, английский, китайский и т.д.)
-
-Ответь максимально полезно и структурированно."""
-
-    return base
-
-# ============ ОБРАБОТЧИКИ ============
+# ========== ОБРАБОТЧИКИ ==========
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        '🤖 *Универсальный AI Бот с OCR*\n\n'
-        'Отправьте мне:\n\n'
-        '📷 *Фото* — любой текст, таблица, документ\n'
-        '📄 *PDF* — текстовый или скан (OCR автоматически)\n'
-        '📝 *TXT* — любой текстовый файл\n'
-        '🌐 *Ссылка* — анализ сайта\n'
-        '💬 *Сообщение* — любой вопрос\n\n'
-        'Я сам пойму задачу и выдам лучший результат!',
-        parse_mode='Markdown'
+        '🤖 Бот для бизнеса\n'
+        'Отправь PDF/фото с заданием\n'
+        'Пример: "Переименуй файлы" + PDF'
     )
 
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Обработка текста и ссылок"""
     text = update.message.text
     
-    if text.startswith(('http://', 'https://')):
-        await update.message.reply_text('🌐 Загружаю сайт...')
-        
-        content = await scrape_website(text)
-        
-        if content:
-            prompt = create_universal_prompt(
-                f"Проанализируй содержимое сайта {urlparse(text).netloc}",
-                content,
-                "веб-страница"
+    if text.startswith('http'):
+        await update.message.reply_text('🌐 Загружаю...')
+        try:
+            from bs4 import BeautifulSoup
+            soup = BeautifulSoup(
+                requests.get(text, headers={'User-Agent': 'Mozilla/5.0'}, timeout=10).text,
+                'html.parser'
             )
-            response = await ask_kimi(prompt)
-            await send_long_message(update, response, "📊 Анализ сайта")
-        else:
-            await update.message.reply_text('❌ Не удалось получить доступ к сайту')
+            for tag in soup(['script', 'style']): tag.decompose()
+            content = soup.get_text(separator='\n', strip=True)[:2000]
+            
+            prompt = f"Краткое содержание (3-5 пунктов):\n{content}"
+            resp = await ask_kimi(prompt)
+            await update.message.reply_text(resp[:4000])
+        except Exception as e:
+            await update.message.reply_text(f'❌ Ошибка: {e}')
     else:
-        prompt = create_universal_prompt(text)
-        response = await ask_kimi(prompt)
-        await send_long_message(update, response, "🤖 Ответ")
+        resp = await ask_kimi(text)
+        await update.message.reply_text(resp[:4000])
 
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Обработка фото"""
     try:
-        await update.message.reply_text('📷 Анализирую изображение...')
+        await update.message.reply_text('📷 Обработка...')
         
         photo = update.message.photo[-1]
-        file: File = await context.bot.get_file(photo.file_id)
+        file = await context.bot.get_file(photo.file_id)
         
-        if photo.file_size and photo.file_size > 10 * 1024 * 1024:
-            await update.message.reply_text("❌ Фото слишком большое (>10MB)")
-            return
+        buf = BytesIO()
+        await file.download_to_memory(buf)
+        buf.seek(0)
         
-        photo_bytes = BytesIO()
-        await file.download_to_memory(photo_bytes)
-        photo_bytes.seek(0)
+        b64 = base64.b64encode(buf.read()).decode()
+        caption = update.message.caption or "Что на изображении?"
         
-        image_base64 = base64.b64encode(photo_bytes.read()).decode('utf-8')
-        
-        user_caption = update.message.caption or "Опиши и проанализируй это изображение. Если таблица — извлеки данные, если документ — прочитай текст."
-        
-        prompt = create_universal_prompt(user_caption)
-        
-        await update.message.reply_text('🤖 Думаю...')
-        response = await ask_kimi(prompt, image_base64)
-        
-        await send_long_message(update, response, "📊 Результат")
-        
+        resp = await ask_kimi(caption, b64)
+        await update.message.reply_text(resp[:4000])
     except Exception as e:
         logging.error(f"Photo error: {e}")
-        await update.message.reply_text('❌ Ошибка при обработке фото')
+        await update.message.reply_text(f'❌ Ошибка: {e}')
 
-async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Обработка документов: TXT и PDF (с OCR)"""
+async def handle_doc(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         doc = update.message.document
-        file_name = doc.file_name or "unknown"
-        mime_type = doc.mime_type or "unknown"
+        caption = update.message.caption or ""
         
-        logging.info(f"Файл: {file_name}, тип: {mime_type}")
-        
-        if doc.file_size and doc.file_size > 20 * 1024 * 1024:
-            await update.message.reply_text('❌ Файл слишком большой (>20MB)')
+        if doc.file_size > 20*1024*1024:
+            await update.message.reply_text('❌ Файл >20MB')
             return
         
-        await update.message.reply_text(f'📄 Загружаю: {file_name}...')
+        name = doc.file_name.lower()
         
-        file: File = await context.bot.get_file(doc.file_id)
-        file_bytes = BytesIO()
-        await file.download_to_memory(file_bytes)
-        file_bytes.seek(0)
+        if not (name.endswith('.pdf') or name.endswith('.txt')):
+            await update.message.reply_text('❌ Только .pdf или .txt')
+            return
         
-        content = None
-        extraction_method = ""
+        await update.message.reply_text('⏳ Загрузка...')
         
-        # ========== ОБРАБОТКА TXT ==========
-        if mime_type == 'text/plain' or file_name.lower().endswith('.txt'):
-            try:
-                content = file_bytes.read().decode('utf-8')
-                extraction_method = "TXT"
-                logging.info(f"TXT: {len(content)} символов")
-            except Exception as e:
-                await update.message.reply_text('❌ Ошибка чтения TXT')
-                return
+        file = await context.bot.get_file(doc.file_id)
+        buf = BytesIO()
+        await file.download_to_memory(buf)
+        buf.seek(0)
+        
+        text = ""
+        barcode_check = ""
+        
+        if name.endswith('.txt'):
+            text = buf.read().decode('utf-8')
+        
+        elif name.endswith('.pdf'):
+            if 'штрих' in caption.lower() or 'barcode' in caption.lower() or 'код' in caption.lower():
+                await update.message.reply_text('🔍 Проверяю штрих-коды...')
+                barcode_check = await check_barcodes(buf)
+                buf.seek(0)
             
-        # ========== ОБРАБОТКА PDF ==========
-        elif mime_type == 'application/pdf' or file_name.lower().endswith('.pdf'):
-            await update.message.reply_text('🔍 Анализирую PDF...')
-            
-            # Пробуем как текстовый PDF
             try:
                 import PyPDF2
-                pdf_reader = PyPDF2.PdfReader(file_bytes)
-                num_pages = min(len(pdf_reader.pages), 30)
-                
-                text_parts = []
-                for i in range(num_pages):
-                    try:
-                        page_text = pdf_reader.pages[i].extract_text()
-                        if page_text:
-                            text_parts.append(page_text)
-                    except:
-                        pass
-                
-                content = '\n\n'.join(text_parts)
-                
-                # Если текст найден — отлично
-                if content and len(content.strip()) > 100:
-                    extraction_method = "PDF текстовый"
-                    logging.info(f"PDF текст: {len(content)} символов")
-                    await update.message.reply_text(f'✅ Найден текстовый слой: {len(content)} символов')
-                else:
-                    # Если нет текста — запускаем OCR
-                    logging.info("PDF без текста, запускаю OCR...")
-                    await update.message.reply_text('📄 PDF — скан/изображение. Запускаю OCR...')
-                    
-                    try:
-                        content = await extract_pdf_with_ocr(file_bytes, update)
-                        extraction_method = "PDF OCR"
-                        
-                        if not content or not content.strip():
-                            await update.message.reply_text('⚠️ OCR не распознал текст. Возможно, качество слишком низкое или язык не поддерживается.')
-                            return
-                            
-                        await update.message.reply_text(f'✅ OCR завершён: {len(content)} символов')
-                        
-                    except Exception as ocr_error:
-                        logging.error(f"OCR failed: {ocr_error}")
-                        await update.message.reply_text(
-                            f'⚠️ Не удалось распознать PDF.\n\n'
-                            f'Ошибка: {str(ocr_error)[:200]}\n\n'
-                            f'💡 Решение: Отправьте скриншоты PDF как фото — я распознаю через Vision API!'
-                        )
-                        return
-                    
-            except Exception as pdf_error:
-                await update.message.reply_text(f'❌ Ошибка чтения PDF: {str(pdf_error)[:200]}')
-                return
+                reader = PyPDF2.PdfReader(buf)
+                text = '\n'.join([p.extract_text() or '' for p in reader.pages[:3]])
+            except:
+                pass
+            
+            if len(text.strip()) < 50:
+                await update.message.reply_text('🔍 OCR...')
+                try:
+                    text = await ocr_pdf(buf)
+                except Exception as e:
+                    await update.message.reply_text(f'❌ OCR ошибка: {e}')
+                    return
         
-        else:
-            await update.message.reply_text(f'❌ Формат не поддерживается: {mime_type}\nОтправьте .txt или .pdf')
+        if not text.strip() and not barcode_check:
+            await update.message.reply_text('⚠️ Нет данных')
             return
         
-        # ========== АНАЛИЗ ==========
-        if content and content.strip():
-            if len(content) > 8000:
-                content = content[:8000]
-                await update.message.reply_text('⚠️ Текст длинный, взял первые 8000 символов')
-            
-            # Получаем задание из подписи
-            caption = update.message.caption or "Проанализируй этот документ и выполни соответствующие задачи. Определи тип документа и обработай соответственно."
-            
-            prompt = create_universal_prompt(caption, content, f"документ ({extraction_method})")
-            
-            await update.message.reply_text('🤖 Анализирую содержимое...')
-            response = await ask_kimi(prompt)
-            
-            await send_long_message(update, response, "📋 Результат")
-        else:
-            await update.message.reply_text('⚠️ Не удалось извлечь текст из файла')
-            
+        prompt = f"""Задача: {caption}
+
+Текст из документа:
+{text[:2500]}
+
+Ответь:
+1. Если просили переименовать - дай только список новых имён
+2. Если штрих-коды - скажи работают/не работают
+3. Без вступлений, только результат"""
+
+        await update.message.reply_text('🤖 Анализ...')
+        resp = await ask_kimi(prompt)
+        
+        if barcode_check:
+            resp = f"📊 Штрих-коды:\n{barcode_check}\n\n{resp}"
+        
+        await update.message.reply_text(resp[:4000])
+        
     except Exception as e:
-        logging.error(f"Document error: {e}")
-        await update.message.reply_text(f'❌ Ошибка: {str(e)}')
+        logging.error(f"Doc error: {e}")
+        await update.message.reply_text(f'❌ Ошибка: {e}')
 
-# ============ ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ============
-
-async def send_long_message(update: Update, text: str, header: str):
-    """Отправляет длинные сообщения частями"""
-    if len(text) > 4000:
-        parts = [text[i:i+4000] for i in range(0, len(text), 4000)]
-        for i, part in enumerate(parts, 1):
-            prefix = f"*{header} (часть {i}/{len(parts)}):*\n\n" if i == 1 else f"*(продолжение {i})*\n\n"
-            await update.message.reply_text(prefix + part, parse_mode='Markdown')
-    else:
-        await update.message.reply_text(f"*{header}:*\n\n{text}", parse_mode='Markdown')
-
-# ============ ЗАПУСК ============
+# ========== ЗАПУСК ==========
 
 def main():
-    application = Application.builder().token(TELEGRAM_TOKEN).build()
+    app = Application.builder().token(TELEGRAM_TOKEN).build()
+    app.add_handler(CommandHandler('start', start))
+    app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
+    app.add_handler(MessageHandler(filters.Document.ALL, handle_doc))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
     
-    application.add_handler(CommandHandler('start', start))
-    application.add_handler(MessageHandler(filters.PHOTO, handle_photo))
-    application.add_handler(MessageHandler(filters.Document.ALL, handle_document))
-    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
-    
-    logging.info("Универсальный бот с OCR запущен")
-    application.run_polling()
+    logging.info("Бот запущен")
+    app.run_polling()
 
 if __name__ == '__main__':
     main()
