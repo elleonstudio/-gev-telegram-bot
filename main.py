@@ -4,187 +4,256 @@ import requests
 import base64
 import re
 from io import BytesIO
-from telegram import Update, InputFile
+from telegram import Update, File
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
-from pdf2image import convert_from_bytes
-import pytesseract
+from bs4 import BeautifulSoup
 
 logging.basicConfig(format='%(asctime)s - %(levelname)s - %(message)s', level=logging.INFO)
 
 TELEGRAM_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
 KIMI_API_KEY = os.getenv('KIMI_API_KEY')
 
-def clean_response(text: str) -> str:
-    garbage = [r'^\d+\.', r'ОПРЕДЕЛИ.*?:', r'ВЫБЕРИ.*?:', r'ВЫПОЛНИ.*?:', 
-               r'АНАЛИЗИРУЮ.*?:', r'РАССУЖДАЮ.*?:', r'---', r'===', 
-               r'ВЫВОД:', r'РЕЗУЛЬТАТ:', r'ОТВЕТ:', r'\*\*\*']
-    for pattern in garbage:
-        text = re.sub(pattern, '', text, flags=re.IGNORECASE | re.MULTILINE)
-    return '\n'.join([l.strip() for l in text.split('\n') if l.strip()])
+# ========== KIMI API ==========
 
 async def ask_kimi(prompt: str, image_b64: str = None) -> str:
     try:
-        headers = {'Authorization': f'Bearer {KIMI_API_KEY}', 'Content-Type': 'application/json'}
-        system_msg = '''Ты помощник для бизнеса. ПРАВИЛА:
-1. Отвечай ТОЛЬКО новым именем файла
-2. БЕЗ слов: "ОПРЕДЕЛИ", "ВЫБЕРИ", "ВЫПОЛНИ", "1.", "2.", "3."
-3. БЕЗ вступлений
-4. Только имя файла, например: "猫玩具_逗猫棒_Cat_Teaser_Toy.pdf"
-5. Формат: [китайский]_[английский]_[артикул].pdf'''
+        headers = {
+            'Authorization': f'Bearer {KIMI_API_KEY}',
+            'Content-Type': 'application/json'
+        }
         
         if image_b64:
-            messages = [{'role': 'system', 'content': system_msg},
-                       {'role': 'user', 'content': [{'type': 'text', 'text': prompt}, {'type': 'image_url', 'image_url': {'url': f'data:image/jpeg;base64,{image_b64}'}}]}]
+            messages = [{
+                'role': 'user',
+                'content': [
+                    {'type': 'text', 'text': prompt},
+                    {'type': 'image_url', 'image_url': {'url': f'data:image/jpeg;base64,{image_b64}'}}
+                ]
+            }]
             model = 'moonshot-v1-8k-vision-preview'
         else:
-            messages = [{'role': 'system', 'content': system_msg}, {'role': 'user', 'content': prompt}]
+            messages = [
+                {'role': 'system', 'content': 'Ты помощник для бизнеса. Отвечай коротко, только результат, без объяснений.'},
+                {'role': 'user', 'content': prompt}
+            ]
             model = 'moonshot-v1-8k'
         
-        data = {'model': model, 'messages': messages, 'temperature': 0.1, 'max_tokens': 500}
-        r = requests.post('https://api.moonshot.cn/v1/chat/completions', headers=headers, json=data, timeout=60)
+        data = {
+            'model': model,
+            'messages': messages,
+            'temperature': 0.1
+        }
+        
+        r = requests.post(
+            'https://api.moonshot.cn/v1/chat/completions',
+            headers=headers,
+            json=data,
+            timeout=60
+        )
         
         if r.status_code == 200:
-            return clean_response(r.json()['choices'][0]['message']['content'])
-        return f"Ошибка_API_{r.status_code}.pdf"
+            return r.json()['choices'][0]['message']['content']
+        else:
+            logging.error(f"Kimi error: {r.status_code} - {r.text}")
+            return f"Ошибка API: {r.status_code}"
+            
     except Exception as e:
-        return f"Ошибка_{str(e)[:20]}.pdf"
+        logging.error(f"Kimi exception: {e}")
+        return f"Ошибка: {str(e)}"
 
-async def check_barcodes(file_bytes: BytesIO) -> tuple:
-    """ВСЕГДА проверяет штрих-коды"""
-    try:
-        from pyzbar.pyzbar import decode
-        
-        file_bytes.seek(0)
-        images = convert_from_bytes(file_bytes.read(), dpi=200)
-        
-        results = []
-        first_barcode = ""
-        for i, img in enumerate(images[:3], 1):
-            codes = decode(img)
-            if codes:
-                for code in codes:
-                    barcode = code.data.decode('utf-8')
-                    if not first_barcode:
-                        first_barcode = barcode
-                    results.append(f"Стр {i}: {barcode} ✅")
-            else:
-                results.append(f"Стр {i}: не найден")
-        
-        return '\n'.join(results) if results else "Штрих-коды не обнаружены", first_barcode
-    except Exception as e:
-        return f"Ошибка: {e}", ""
+# ========== OCR ==========
 
 async def ocr_pdf(file_bytes: BytesIO) -> str:
-    try:
-        file_bytes.seek(0)
-        images = convert_from_bytes(file_bytes.read(), first_page=1, last_page=1, dpi=200)
-        
-        texts = []
-        for img in images:
-            text = pytesseract.image_to_string(img, lang='rus+eng+chi_sim')
-            if text.strip():
-                texts.append(text.strip())
-        
-        return '\n'.join(texts)
-    except Exception as e:
-        return ""
+    from pdf2image import convert_from_bytes
+    import pytesseract
+    
+    file_bytes.seek(0)
+    images = convert_from_bytes(file_bytes.read(), first_page=1, last_page=3, dpi=200)
+    
+    texts = []
+    for i, img in enumerate(images):
+        text = pytesseract.image_to_string(img, lang='rus+eng')
+        if text.strip():
+            texts.append(f"--- Страница {i+1} ---\n{text.strip()}")
+    
+    return '\n\n'.join(texts)
+
+# ========== ПРОВЕРКА ШТРИХ-КОДОВ ==========
+
+def check_barcodes(text: str) -> dict:
+    """Находит и проверяет штрих-коды в тексте"""
+    # Ищем цифры длиной 8-13 символов (EAN-8, EAN-13, и т.д.)
+    barcodes = re.findall(r'\b\d{8,13}\b', text.replace(' ', '').replace('\n', ''))
+    
+    # Убираем дубликаты
+    unique_barcodes = list(set(barcodes))
+    
+    result = {
+        'found': unique_barcodes,
+        'count': len(unique_barcodes),
+        'by_page': {}
+    }
+    
+    # Ищем по страницам
+    pages = text.split('--- Страница')
+    for i, page in enumerate(pages[1:], 1):
+        page_barcodes = re.findall(r'\b\d{8,13}\b', page.replace(' ', '').replace('\n', ''))
+        if page_barcodes:
+            result['by_page'][f'Стр {i}'] = list(set(page_barcodes))
+    
+    return result
+
+def validate_barcode(barcode: str) -> bool:
+    """Проверка контрольной суммы EAN-13"""
+    if len(barcode) != 13:
+        return len(barcode) in [8, 12, 13]  # Допустимые длины
+    
+    # EAN-13 checksum
+    odd = sum(int(barcode[i]) for i in range(0, 12, 2))
+    even = sum(int(barcode[i]) for i in range(1, 12, 2))
+    checksum = (10 - (odd + even * 3) % 10) % 10
+    
+    return checksum == int(barcode[12])
+
+# ========== ОБРАБОТЧИКИ ==========
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text('🤖 Отправь PDF — получишь переименованный файл')
+    await update.message.reply_text('🤖 Отправь PDF/фото с заданием')
+
+async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = update.message.text
+    
+    if text.startswith('http'):
+        await update.message.reply_text('🌐 Загружаю...')
+        try:
+            soup = BeautifulSoup(requests.get(text, headers={'User-Agent': 'Mozilla/5.0'}, timeout=10).text, 'html.parser')
+            for tag in soup(['script', 'style']): tag.decompose()
+            content = soup.get_text(separator='\n', strip=True)[:3000]
+            
+            prompt = f"Краткое содержание:\n\n{content}\n\n3-5 пунктов:"
+            resp = await ask_kimi(prompt)
+            await update.message.reply_text(resp[:4000])
+        except Exception as e:
+            await update.message.reply_text(f'❌ Ошибка: {e}')
+    else:
+        prompt = f"{text}\n\nКоротко:"
+        resp = await ask_kimi(prompt)
+        await update.message.reply_text(resp[:4000])
+
+async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    try:
+        await update.message.reply_text('📷 Обработка...')
+        
+        photo = update.message.photo[-1]
+        file = await context.bot.get_file(photo.file_id)
+        
+        buf = BytesIO()
+        await file.download_to_memory(buf)
+        buf.seek(0)
+        
+        b64 = base64.b64encode(buf.read()).decode()
+        caption = update.message.caption or "Опиши"
+        
+        prompt = f"{caption}\n\nКоротко, факты:"
+        resp = await ask_kimi(prompt, b64)
+        
+        await update.message.reply_text(resp[:4000])
+    except Exception as e:
+        await update.message.reply_text(f'❌ Ошибка: {e}')
 
 async def handle_doc(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         doc = update.message.document
-        original_name = doc.file_name
         
         if doc.file_size > 20*1024*1024:
             await update.message.reply_text('❌ Файл >20MB')
             return
         
-        if not original_name.lower().endswith('.pdf'):
-            await update.message.reply_text('❌ Только .pdf')
-            return
-        
         await update.message.reply_text('⏳ Загрузка...')
         
-        # Скачиваем файл
         file = await context.bot.get_file(doc.file_id)
         buf = BytesIO()
         await file.download_to_memory(buf)
-        
-        # ВСЕГДА проверяем штрих-коды (убрано условие!)
-        await update.message.reply_text('🔍 Проверяю штрих-коды...')
-        barcode_check, barcode_num = await check_barcodes(buf)
         buf.seek(0)
         
-        # Извлекаем текст
+        name = doc.file_name.lower()
         text = ""
-        try:
-            import PyPDF2
-            reader = PyPDF2.PdfReader(buf)
-            text = '\n'.join([p.extract_text() or '' for p in reader.pages[:2]])
-        except:
-            pass
         
-        if len(text.strip()) < 30:
-            text = await ocr_pdf(buf)
-            buf.seek(0)
+        # TXT
+        if name.endswith('.txt'):
+            text = buf.read().decode('utf-8')
+            
+        # PDF
+        elif name.endswith('.pdf'):
+            # Текстовый слой
+            try:
+                import PyPDF2
+                reader = PyPDF2.PdfReader(buf)
+                text = '\n'.join([p.extract_text() or '' for p in reader.pages[:3]])
+            except:
+                pass
+            
+            # OCR
+            if len(text.strip()) < 50:
+                await update.message.reply_text('🔍 OCR...')
+                text = await ocr_pdf(buf)
+        else:
+            await update.message.reply_text('❌ Только .pdf или .txt')
+            return
         
-        # Генерируем новое имя
-        await update.message.reply_text('🤖 Генерирую имя файла...')
+        if not text.strip():
+            await update.message.reply_text('⚠️ Нет текста')
+            return
         
-        prompt = f"""Создай имя файла на основе текста:
+        # Проверка штрих-кодов
+        barcode_info = check_barcodes(text)
+        
+        # Формируем промпт
+        caption = update.message.caption or "Проанализируй документ"
+        
+        barcode_list = ', '.join(barcode_info['found']) if barcode_info['found'] else 'НЕ НАЙДЕНЫ'
+        
+        prompt = f"""ЗАДАЧА: {caption}
 
-Текст:
-{text[:1500]}
+ТЕКСТ:
+{text[:2500]}
 
-Штрих-код: {barcode_num}
+НАЙДЕННЫЕ ШТРИХ-КОДЫ: {barcode_list}
 
-Формат: [Китайский]_[Английский]_[Артикул].pdf
-Пример: 猫玩具_逗猫棒_Cat_Teaser_Toy_881455116.pdf
+ВЫДАЙ РЕЗУЛЬТАТ:
+1. Штрих-коды: перечисли все с проверкой (✅ корректен / ❌ ошибка)
+2. Новое имя файла на китайском-английском с артикулом и штрих-кодом
+3. Размеры: укажи из текста (если есть)
+4. Проверка: что не так, чего не хватает
 
-Только имя файла:"""
+Коротко, без лишних слов."""
 
-        new_name = await ask_kimi(prompt)
+        await update.message.reply_text('🤖 Анализ...')
+        resp = await ask_kimi(prompt)
         
-        # Очищаем имя файла
-        new_name = new_name.strip().replace('\n', '_').replace(' ', '_')
-        if not new_name.endswith('.pdf'):
-            new_name += '.pdf'
-        new_name = re.sub(r'[\\/*?:"<>|]', '', new_name)
-        if len(new_name) > 100:
-            new_name = new_name[:100] + '.pdf'
+        # Добавляем свою проверку штрих-кодов
+        barcode_check = "\n\n📊 *Проверка штрих-кодов:*\n"
+        if barcode_info['found']:
+            for bc in barcode_info['found']:
+                valid = validate_barcode(bc)
+                barcode_check += f"• `{bc}` {'✅' if valid else '❌'}\n"
+        else:
+            barcode_check += "• ❌ Не найдены\n"
         
-        # Отправляем результат
-        response = f"📊 Штрих-коды:\n{barcode_check}\n\n📄 Новое имя: `{new_name}`"
-        await update.message.reply_text(response, parse_mode='Markdown')
+        # Итог
+        final = resp + barcode_check
         
-        # ВСЕГДА отправляем файл с новым именем
-        buf.seek(0)
-        await update.message.reply_document(
-            document=InputFile(buf, filename=new_name),
-            caption=f"✅ Переименован"
-        )
+        # Чистим
+        for bad in ['ОПРЕДЕЛИ', 'ВЫБЕРИ', 'ВЫПОЛНИ', '---', 'ЗАДАЧА:', 'ФОРМАТ:', 'ЯЗЫК:']:
+            final = final.replace(bad, '')
+        
+        await update.message.reply_text(final.strip()[:4000])
         
     except Exception as e:
         logging.error(f"Doc error: {e}")
         await update.message.reply_text(f'❌ Ошибка: {e}')
 
-async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    try:
-        photo = update.message.photo[-1]
-        file = await context.bot.get_file(photo.file_id)
-        buf = BytesIO()
-        await file.download_to_memory(buf)
-        b64 = base64.b64encode(buf.read()).decode()
-        resp = await ask_kimi(update.message.caption or "Опиши", b64)
-        await update.message.reply_text(resp[:4000])
-    except Exception as e:
-        await update.message.reply_text(f'❌ Ошибка: {e}')
-
-async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    resp = await ask_kimi(update.message.text)
-    await update.message.reply_text(resp[:4000])
+# ========== ЗАПУСК ==========
 
 def main():
     app = Application.builder().token(TELEGRAM_TOKEN).build()
@@ -192,8 +261,9 @@ def main():
     app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
     app.add_handler(MessageHandler(filters.Document.ALL, handle_doc))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
+    
     logging.info("Бот запущен")
-    app.run_polling(drop_pending_updates=True)
+    app.run_polling()
 
 if __name__ == '__main__':
     main()
