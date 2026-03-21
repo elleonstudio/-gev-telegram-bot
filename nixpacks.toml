@@ -1,0 +1,8 @@
+[phases.setup]
+aptPkgs = ["poppler-utils", "tesseract-ocr", "tesseract-ocr-rus", "tesseract-ocr-eng", "tesseract-ocr-chi-sim", "libzbar0", "zbar-tools"]
+
+[phases.build]
+cmds = ["pip install -r requirements.txt"]
+
+[start]
+cmd = "python main.py"
