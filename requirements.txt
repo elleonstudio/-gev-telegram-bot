@@ -1,7 +1,6 @@
-﻿requests
 python-telegram-bot>=20.0
 requests
 beautifulsoup4
 lxml
 Pillow
-
+PyPDF2
