@@ -15,35 +15,26 @@ TELEGRAM_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
 KIMI_API_KEY = os.getenv('KIMI_API_KEY')
 
 def clean_response(text: str) -> str:
-    """Удаляет мусорные слова из ответа"""
-    garbage = [
-        r'^\d+\.', r'ОПРЕДЕЛИ.*?:', r'ВЫБЕРИ.*?:', r'ВЫПОЛНИ.*?:', 
-        r'АНАЛИЗИРУЮ.*?:', r'РАССУЖДАЮ.*?:', r'---', r'===', 
-        r'ВЫВОД:', r'РЕЗУЛЬТАТ:', r'ОТВЕТ:', r'\*\*\*'
-    ]
+    garbage = [r'^\d+\.', r'ОПРЕДЕЛИ.*?:', r'ВЫБЕРИ.*?:', r'ВЫПОЛНИ.*?:', 
+               r'АНАЛИЗИРУЮ.*?:', r'РАССУЖДАЮ.*?:', r'---', r'===', 
+               r'ВЫВОД:', r'РЕЗУЛЬТАТ:', r'ОТВЕТ:', r'\*\*\*']
     for pattern in garbage:
         text = re.sub(pattern, '', text, flags=re.IGNORECASE | re.MULTILINE)
     return '\n'.join([l.strip() for l in text.split('\n') if l.strip()])
 
 async def ask_kimi(prompt: str, image_b64: str = None) -> str:
-    """Отправляет запрос в Kimi API"""
     try:
         headers = {'Authorization': f'Bearer {KIMI_API_KEY}', 'Content-Type': 'application/json'}
         system_msg = '''Ты помощник для бизнеса. ПРАВИЛА:
 1. Отвечай ТОЛЬКО новым именем файла
 2. БЕЗ слов: "ОПРЕДЕЛИ", "ВЫБЕРИ", "ВЫПОЛНИ", "1.", "2.", "3."
-3. БЕЗ вступлений и заключений
+3. БЕЗ вступлений
 4. Только имя файла, например: "猫玩具_逗猫棒_Cat_Teaser_Toy.pdf"
 5. Формат: [китайский]_[английский]_[артикул].pdf'''
         
         if image_b64:
-            messages = [
-                {'role': 'system', 'content': system_msg},
-                {'role': 'user', 'content': [
-                    {'type': 'text', 'text': prompt},
-                    {'type': 'image_url', 'image_url': {'url': f'data:image/jpeg;base64,{image_b64}'}}
-                ]}
-            ]
+            messages = [{'role': 'system', 'content': system_msg},
+                       {'role': 'user', 'content': [{'type': 'text', 'text': prompt}, {'type': 'image_url', 'image_url': {'url': f'data:image/jpeg;base64,{image_b64}'}}]}]
             model = 'moonshot-v1-8k-vision-preview'
         else:
             messages = [{'role': 'system', 'content': system_msg}, {'role': 'user', 'content': prompt}]
@@ -59,7 +50,7 @@ async def ask_kimi(prompt: str, image_b64: str = None) -> str:
         return f"Ошибка_{str(e)[:20]}.pdf"
 
 async def check_barcodes(file_bytes: BytesIO) -> tuple:
-    """Проверяет штрих-коды в PDF, возвращает (штрихкоды_текст, первый_штрихкод)"""
+    """ВСЕГДА проверяет штрих-коды"""
     try:
         from pyzbar.pyzbar import decode
         
@@ -79,12 +70,11 @@ async def check_barcodes(file_bytes: BytesIO) -> tuple:
             else:
                 results.append(f"Стр {i}: не найден")
         
-        return '\n'.join(results) if results else "", first_barcode
+        return '\n'.join(results) if results else "Штрих-коды не обнаружены", first_barcode
     except Exception as e:
         return f"Ошибка: {e}", ""
 
 async def ocr_pdf(file_bytes: BytesIO) -> str:
-    """OCR через tesseract"""
     try:
         file_bytes.seek(0)
         images = convert_from_bytes(file_bytes.read(), first_page=1, last_page=1, dpi=200)
@@ -100,12 +90,11 @@ async def ocr_pdf(file_bytes: BytesIO) -> str:
         return ""
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text('🤖 Отправь PDF с подписью "переименуй"')
+    await update.message.reply_text('🤖 Отправь PDF — получишь переименованный файл')
 
 async def handle_doc(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         doc = update.message.document
-        caption = update.message.caption or ""
         original_name = doc.file_name
         
         if doc.file_size > 20*1024*1024:
@@ -123,14 +112,12 @@ async def handle_doc(update: Update, context: ContextTypes.DEFAULT_TYPE):
         buf = BytesIO()
         await file.download_to_memory(buf)
         
-        # Проверка штрих-кодов
-        barcode_check, barcode_num = "", ""
-        if any(word in caption.lower() for word in ['штрих', 'код', 'barcode', 'проверь']):
-            await update.message.reply_text('🔍 Проверяю штрих-коды...')
-            barcode_check, barcode_num = await check_barcodes(buf)
-            buf.seek(0)
+        # ВСЕГДА проверяем штрих-коды (убрано условие!)
+        await update.message.reply_text('🔍 Проверяю штрих-коды...')
+        barcode_check, barcode_num = await check_barcodes(buf)
+        buf.seek(0)
         
-        # Извлекаем текст (текстовый слой или OCR)
+        # Извлекаем текст
         text = ""
         try:
             import PyPDF2
@@ -140,32 +127,23 @@ async def handle_doc(update: Update, context: ContextTypes.DEFAULT_TYPE):
             pass
         
         if len(text.strip()) < 30:
-            await update.message.reply_text('🔍 Распознаю текст...')
             text = await ocr_pdf(buf)
             buf.seek(0)
         
-        # Генерируем новое имя через Kimi
+        # Генерируем новое имя
         await update.message.reply_text('🤖 Генерирую имя файла...')
         
-        prompt = f"""На основе текста создай новое имя файла.
+        prompt = f"""Создай имя файла на основе текста:
 
-Текст документа:
+Текст:
 {text[:1500]}
 
 Штрих-код: {barcode_num}
 
-Правила для имени:
-1. Формат: [Китайский]_[Английский]_[Артикул].pdf
-2. Без пробелов, используй _
-3. Китайский: короткое название товара
-4. Английский: короткое название товара
-5. Артикул: из текста или штрих-кода
+Формат: [Китайский]_[Английский]_[Артикул].pdf
+Пример: 猫玩具_逗猫棒_Cat_Teaser_Toy_881455116.pdf
 
-Примеры:
-- 猫玩具_逗猫棒_Cat_Teaser_Toy_881455116.pdf
-- 汽车遮阳挡_Car_Sunshade_150x70_881532453.pdf
-
-Только имя файла, без пояснений:"""
+Только имя файла:"""
 
         new_name = await ask_kimi(prompt)
         
@@ -174,19 +152,18 @@ async def handle_doc(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not new_name.endswith('.pdf'):
             new_name += '.pdf'
         new_name = re.sub(r'[\\/*?:"<>|]', '', new_name)
+        if len(new_name) > 100:
+            new_name = new_name[:100] + '.pdf'
         
-        # Формируем ответ
-        response = f"📄 Новое имя: `{new_name}`"
-        if barcode_check:
-            response = f"📊 Штрих-коды:\n{barcode_check}\n\n{response}"
-        
+        # Отправляем результат
+        response = f"📊 Штрих-коды:\n{barcode_check}\n\n📄 Новое имя: `{new_name}`"
         await update.message.reply_text(response, parse_mode='Markdown')
         
-        # Отправляем файл с новым именем
+        # ВСЕГДА отправляем файл с новым именем
         buf.seek(0)
         await update.message.reply_document(
             document=InputFile(buf, filename=new_name),
-            caption=f"✅ Переименовано"
+            caption=f"✅ Переименован"
         )
         
     except Exception as e:
