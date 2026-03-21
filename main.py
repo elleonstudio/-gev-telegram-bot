@@ -6,6 +6,8 @@ import re
 from io import BytesIO
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
+from pdf2image import convert_from_bytes
+import pytesseract
 
 logging.basicConfig(format='%(asctime)s - %(levelname)s - %(message)s', level=logging.INFO)
 
@@ -14,7 +16,7 @@ KIMI_API_KEY = os.getenv('KIMI_API_KEY')
 
 def clean_response(text: str) -> str:
     garbage = [r'ОПРЕДЕЛИ.*?:', r'ВЫБЕРИ.*?:', r'ВЫПОЛНИ.*?:', r'АНАЛИЗИРУЮ.*?:',
-               r'РАССУЖДАЮ.*?:', r'---', r'ВЫВОД:', r'РЕЗУЛЬТАТ:']
+               r'РАССУЖДАЮ.*?:', r'---', r'===', r'ВЫВОД:', r'РЕЗУЛЬТАТ:', r'ОТВЕТ:']
     for pattern in garbage:
         text = re.sub(pattern, '', text, flags=re.IGNORECASE)
     return '\n'.join([l.strip() for l in text.split('\n') if l.strip()])
@@ -25,11 +27,17 @@ async def ask_kimi(prompt: str, image_b64: str = None) -> str:
         system_msg = '''Ты бизнес-ассистент. ПРАВИЛА:
 1. Отвечай ТОЛЬКО результатом
 2. БЕЗ слов: "ОПРЕДЕЛИ", "ВЫБЕРИ", "ВЫПОЛНИ"
-3. Коротко, по делу'''
+3. БЕЗ вступлений
+4. Коротко, по делу'''
         
         if image_b64:
-            messages = [{'role': 'system', 'content': system_msg},
-                       {'role': 'user', 'content': [{'type': 'text', 'text': prompt}, {'type': 'image_url', 'image_url': {'url': f'data:image/jpeg;base64,{image_b64}'}}]}]
+            messages = [
+                {'role': 'system', 'content': system_msg},
+                {'role': 'user', 'content': [
+                    {'type': 'text', 'text': prompt},
+                    {'type': 'image_url', 'image_url': {'url': f'data:image/jpeg;base64,{image_b64}'}}
+                ]}
+            ]
             model = 'moonshot-v1-8k-vision-preview'
         else:
             messages = [{'role': 'system', 'content': system_msg}, {'role': 'user', 'content': prompt}]
@@ -46,7 +54,6 @@ async def ask_kimi(prompt: str, image_b64: str = None) -> str:
 
 async def check_barcodes(file_bytes: BytesIO) -> str:
     try:
-        from pdf2image import convert_from_bytes
         from pyzbar.pyzbar import decode
         
         file_bytes.seek(0)
@@ -61,12 +68,28 @@ async def check_barcodes(file_bytes: BytesIO) -> str:
             else:
                 results.append(f"Стр {i}: не найден")
         
-        return '\n'.join(results) if results else "Штрих-коды не обнаружены"
+        return '\n'.join(results) if results else ""
     except Exception as e:
         return f"Ошибка: {e}"
 
+async def ocr_pdf(file_bytes: BytesIO) -> str:
+    """OCR через tesseract"""
+    try:
+        file_bytes.seek(0)
+        images = convert_from_bytes(file_bytes.read(), first_page=1, last_page=2, dpi=200)
+        
+        texts = []
+        for img in images:
+            text = pytesseract.image_to_string(img, lang='rus+eng')
+            if text.strip():
+                texts.append(text.strip())
+        
+        return '\n'.join(texts)
+    except Exception as e:
+        return f"OCR ошибка: {e}"
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text('🤖 Бот для бизнеса\nОтправь PDF/фото с заданием')
+    await update.message.reply_text('🤖 Бот для бизнеса\nОтправь PDF с заданием')
 
 async def handle_doc(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
@@ -88,11 +111,15 @@ async def handle_doc(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await file.download_to_memory(buf)
         
         barcode_check = ""
-        if 'штрих' in caption.lower() or 'код' in caption.lower() or 'barcode' in caption.lower():
+        text = ""
+        
+        # Проверка штрих-кодов
+        if any(word in caption.lower() for word in ['штрих', 'код', 'barcode']):
             await update.message.reply_text('🔍 Проверяю штрих-коды...')
             barcode_check = await check_barcodes(buf)
             buf.seek(0)
         
+        # Пробуем текстовый слой
         try:
             import PyPDF2
             reader = PyPDF2.PdfReader(buf)
@@ -100,19 +127,43 @@ async def handle_doc(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except:
             text = ""
         
-        if not text and not barcode_check:
-            await update.message.reply_text('⚠️ Нет текста в PDF')
+        # Если мало текста — OCR
+        if len(text.strip()) < 50:
+            await update.message.reply_text('🔍 Распознаю текст...')
+            ocr_text = await ocr_pdf(buf)
+            if not ocr_text.startswith("OCR ошибка"):
+                text = ocr_text
+            buf.seek(0)
+        
+        if not text.strip() and not barcode_check:
+            await update.message.reply_text('⚠️ Нет данных в PDF')
             return
         
-        prompt = f"Задача: {caption}\n\nТекст:\n{text[:2500]}\n\nКороткий ответ:"
+        prompt = f"""Задача: {caption}
+
+Текст документа:
+{text[:2500]}
+
+Штрих-коды:
+{barcode_check}
+
+Дай ответ:
+1. Название товара на русском
+2. Новое имя файла (китайский-английский)
+3. Штрих-код и статус (работает/не работает)
+
+Только результат, без размышлений."""
+        
+        await update.message.reply_text('🤖 Анализ...')
         resp = await ask_kimi(prompt)
         
         if barcode_check:
-            resp = f"📊 Штрих-коды:\n{barcode_check}\n\n{resp}"
+            resp = f"📊 Штрих-коды:\n{barcode_check}\n\n📝 {resp}"
         
         await update.message.reply_text(resp[:4000])
         
     except Exception as e:
+        logging.error(f"Doc error: {e}")
         await update.message.reply_text(f'❌ Ошибка: {e}')
 
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -122,7 +173,7 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         buf = BytesIO()
         await file.download_to_memory(buf)
         b64 = base64.b64encode(buf.read()).decode()
-        resp = await ask_kimi(update.message.caption or "Что на фото?", b64)
+        resp = await ask_kimi(update.message.caption or "Опиши изображение", b64)
         await update.message.reply_text(resp[:4000])
     except Exception as e:
         await update.message.reply_text(f'❌ Ошибка: {e}')
@@ -138,7 +189,7 @@ def main():
     app.add_handler(MessageHandler(filters.Document.ALL, handle_doc))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
     logging.info("Бот запущен")
-    app.run_polling(drop_pending_updates=True)  # Очищает очередь при старте
+    app.run_polling(drop_pending_updates=True)
 
 if __name__ == '__main__':
     main()
