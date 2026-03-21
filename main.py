@@ -31,18 +31,13 @@ async def scrape_website(url: str) -> str:
         
         soup = BeautifulSoup(response.text, 'html.parser')
         
-        # Удаляем ненужные элементы
         for element in soup(['script', 'style', 'nav', 'footer', 'header', 'aside']):
             element.decompose()
         
-        # Получаем текст
         text = soup.get_text(separator='\n', strip=True)
-        
-        # Очищаем от лишних пробелов и пустых строк
         lines = [line.strip() for line in text.splitlines() if line.strip()]
         text = '\n'.join(lines)
         
-        # Ограничиваем длину для Kimi
         return text[:6000]
         
     except Exception as e:
@@ -59,14 +54,13 @@ async def ask_kimi(text: str, image_base64: str = None) -> str:
             'Content-Type': 'application/json'
         }
         
-        messages = [{'role': 'system', 'content': 'You are a professional analyst. Analyze provided content thoroughly.'}]
+        messages = [{'role': 'system', 'content': 'You are a professional data analyst. Extract, process and structure data accurately.'}]
         
-        # Если есть изображение — используем vision-модель
         if image_base64:
             messages.append({
                 'role': 'user',
                 'content': [
-                    {'type': 'text', 'text': text or 'Analyze this image'},
+                    {'type': 'text', 'text': text},
                     {'type': 'image_url', 'image_url': {'url': f'data:image/jpeg;base64,{image_base64}'}}
                 ]
             })
@@ -78,7 +72,7 @@ async def ask_kimi(text: str, image_base64: str = None) -> str:
         data = {
             'model': model,
             'messages': messages,
-            'temperature': 0.3
+            'temperature': 0.2
         }
         
         response = requests.post(
@@ -98,17 +92,74 @@ async def ask_kimi(text: str, image_base64: str = None) -> str:
         logging.error(f"Kimi error: {e}")
         return "Ошибка при обращении к AI"
 
+# ============ ПРОМПТЫ ============
+
+def create_analysis_prompt(user_request: str, content: str, content_type: str = "текст") -> str:
+    """Создаёт структурированный промпт для анализа"""
+    
+    base_prompt = f"""🔍 ЗАДАЧА ПОЛЬЗОВАТЕЛЯ:
+{user_request}
+
+📋 ИСХОДНЫЕ ДАННЫЕ ({content_type}):
+{content}
+
+⚡ ИНСТРУКЦИИ:
+1. Внимательно извлеки ВСЕ данные из источника
+2. Выполни конкретное задание пользователя точно и полностью
+3. Не просто описывай — выполняй действия (считай, группируй, распределяй, сравнивай)
+4. Используй структурированный формат: таблицы, списки, итоги
+5. Если есть числа — посчитай суммы, разности, проценты где уместно
+6. Проверь штрих-коды на корректность (если есть)
+7. Выдели ключевые показатели и выводы
+
+📊 ТРЕБОВАНИЯ К ФОРМАТУ ОТВЕТА:
+- Начни с краткого резюме выполненной работы
+- Представь данные в табличном виде где возможно
+- Добавь итоговые суммы/выводы
+- Укажи рекомендации или следующие шаги (если уместно)
+
+Ответь по-русски профессионально."""
+
+    return base_prompt
+
+def create_vision_prompt(user_caption: str) -> str:
+    """Создаёт промпт для анализа изображений"""
+    
+    if not user_caption or user_caption.strip() == "":
+        user_caption = "Проанализируй изображение и извлеки все данные"
+    
+    return f"""🎯 ЗАДАЧА: {user_caption}
+
+📸 ИЗОБРАЖЕНИЕ: (смотри на фото выше)
+
+⚡ ИНСТРУКЦИИ:
+1. Распознай ВСЕ текстовые данные, таблицы, числа, названия
+2. Выполни конкретное задание пользователя — не просто описывай
+3. Если это таблица — перестрой её в текстовый вид
+4. Если нужно распределить/сгруппировать — сделай это
+5. Посчитай итоги, суммы, разности где требуется
+6. Проверь данные на логику и корректность
+
+📊 ТРЕБОВАНИЯ:
+- НЕ пиши "на изображении видно" — просто выдай результат
+- Используй таблицы Markdown для данных
+- Добавь итоговые расчёты
+- Будь точным с числами и названиями
+
+Ответь по-русски структурированно."""
+
 # ============ ОБРАБОТЧИКИ ============
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        '🤖 *Gev Bot Pro*\n\n'
-        'Я умею:\n'
-        '📝 Анализировать текст\n'
-        '📷 Анализировать фото (Kimi Vision)\n'
-        '📄 Читать документы (PDF, TXT)\n'
-        '🌐 Заходить на сайты и анализировать их\n\n'
-        'Просто отправьте мне ссылку, фото или текст!',
+        '🤖 *Gev Bot Pro — Анализ данных*\n\n'
+        'Отправьте мне:\n'
+        '📷 Фото с таблицей/данными\n'
+        '📄 PDF или TXT документ\n'
+        '🌐 Ссылку на сайт\n'
+        '💬 Текст для анализа\n\n'
+        '*Важно:* Добавьте подпись с конкретным заданием!\n'
+        'Пример: "Распредели по складам, посчитай итоги"',
         parse_mode='Markdown'
     )
 
@@ -118,63 +169,91 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     # Проверяем, является ли текст ссылкой
     if text.startswith(('http://', 'https://')):
-        await update.message.reply_text('🌐 Захожу на сайт, анализирую...')
+        await update.message.reply_text('🌐 Захожу на сайт, извлекаю данные...')
         
-        # Скрапим сайт
         content = await scrape_website(text)
         
         if content:
-            # Отправляем в Kimi для анализа
-            prompt = f"Проанализируй содержимое этого сайта и выдели ключевую информацию:\n\n{content}"
+            prompt = create_analysis_prompt(
+                "Проанализируй содержимое сайта, выдели ключевую информацию и структурируй данные",
+                content,
+                "веб-страница"
+            )
             analysis = await ask_kimi(prompt)
             
-            # Формируем ответ
             domain = urlparse(text).netloc
-            response = f"📊 *Анализ сайта:* `{domain}`\n\n{analysis[:3000]}"
+            response = f"📊 *Анализ сайта:* `{domain}`\n\n{analysis[:3500]}"
             
-            if len(analysis) > 3000:
-                response += "\n\n_(ответ сокращён)_"
+            if len(analysis) > 3500:
+                response += "\n\n_(часть ответа сокращена)_"
                 
             await update.message.reply_text(response, parse_mode='Markdown')
         else:
-            await update.message.reply_text('❌ Не удалось получить доступ к сайту. Возможно, он защищён от ботов.')
+            await update.message.reply_text('❌ Не удалось получить доступ к сайту')
     else:
-        # Обычный текст — отправляем в Kimi
-        response = await ask_kimi(text)
+        # Обычный текст
+        prompt = create_analysis_prompt(
+            "Проанализируй текст и выдели ключевую информацию",
+            text,
+            "текст"
+        )
+        response = await ask_kimi(prompt)
         await update.message.reply_text(response)
 
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Обработка фото через Kimi Vision"""
     try:
-        await update.message.reply_text('📷 Скачиваю и анализирую фото...')
+        await update.message.reply_text('📷 Сканирую изображение...')
         
-        # Получаем фото (максимальное качество)
         photo = update.message.photo[-1]
         file: File = await context.bot.get_file(photo.file_id)
         
-        # Скачиваем в память (не на диск — для Railway лучше так)
+        # Проверяем размер
+        if photo.file_size and photo.file_size > 10 * 1024 * 1024:  # 10 MB
+            await update.message.reply_text("❌ Фото слишком большое (>10MB). Отправьте меньше или обрежьте.")
+            return
+        
         photo_bytes = BytesIO()
         await file.download_to_memory(photo_bytes)
         photo_bytes.seek(0)
         
-        # Конвертируем в base64
         image_base64 = base64.b64encode(photo_bytes.read()).decode('utf-8')
         
-        # Отправляем в Kimi Vision
-        caption = update.message.caption or "Опиши и проанализируй это изображение подробно."
-        response = await ask_kimi(caption, image_base64)
+        # Получаем подпись и создаём структурированный промпт
+        user_caption = update.message.caption or ""
+        structured_prompt = create_vision_prompt(user_caption)
         
-        await update.message.reply_text(f"🖼️ *Анализ изображения:*\n\n{response}", parse_mode='Markdown')
+        await update.message.reply_text('🤖 Анализирую данные...')
+        response = await ask_kimi(structured_prompt, image_base64)
+        
+        # Разбиваем длинный ответ
+        if len(response) > 4000:
+            parts = [response[i:i+4000] for i in range(0, len(response), 4000)]
+            await update.message.reply_text(f"📊 *Результат (часть 1/{len(parts)}):*\n\n{parts[0]}", parse_mode='Markdown')
+            for i, part in enumerate(parts[1:], 2):
+                await update.message.reply_text(f"📄 *Часть {i}:*\n\n{part}", parse_mode='Markdown')
+        else:
+            await update.message.reply_text(f"📊 *Результат анализа:*\n\n{response}", parse_mode='Markdown')
         
     except Exception as e:
         logging.error(f"Photo error: {e}")
-        await update.message.reply_text('❌ Ошибка при обработке фото')
+        await update.message.reply_text('❌ Ошибка при обработке фото. Попробуйте другое изображение.')
 
 async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Обработка документов: TXT и PDF"""
     try:
         doc = update.message.document
-        await update.message.reply_text(f'📄 Получаю файл: {doc.file_name}...')
+        file_name = doc.file_name or "unknown"
+        mime_type = doc.mime_type or "unknown"
+        
+        logging.info(f"Получен файл: {file_name}, mime_type: {mime_type}")
+        
+        # Проверка размера (макс 20MB)
+        if doc.file_size and doc.file_size > 20 * 1024 * 1024:
+            await update.message.reply_text('❌ Файл слишком большой (>20MB)')
+            return
+        
+        await update.message.reply_text(f'📄 Загружаю: {file_name}...')
         
         file: File = await context.bot.get_file(doc.file_id)
         file_bytes = BytesIO()
@@ -182,63 +261,88 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
         file_bytes.seek(0)
         
         content = None
+        file_type = "неизвестный"
         
         # Обработка TXT
-        if doc.mime_type == 'text/plain':
-            content = file_bytes.read().decode('utf-8')
+        if mime_type == 'text/plain' or file_name.lower().endswith('.txt'):
+            try:
+                content = file_bytes.read().decode('utf-8')
+                file_type = "TXT"
+                logging.info(f"TXT прочитан: {len(content)} символов")
+            except Exception as e:
+                logging.error(f"Ошибка чтения TXT: {e}")
+                await update.message.reply_text('❌ Ошибка чтения TXT файла')
+                return
             
         # Обработка PDF
-        elif doc.file_name.lower().endswith('.pdf') or doc.mime_type == 'application/pdf':
+        elif mime_type == 'application/pdf' or file_name.lower().endswith('.pdf'):
             try:
                 import PyPDF2
+                logging.info("Чтение PDF...")
+                
                 pdf_reader = PyPDF2.PdfReader(file_bytes)
+                num_pages = len(pdf_reader.pages)
                 
-                # Читаем все страницы
+                if num_pages > 50:
+                    await update.message.reply_text(f'⚠️ PDF большой ({num_pages} стр). Буду читать первые 50 страниц.')
+                    num_pages = 50
+                
                 text_parts = []
-                for page in pdf_reader.pages:
-                    text_parts.append(page.extract_text())
+                for i in range(num_pages):
+                    try:
+                        page_text = pdf_reader.pages[i].extract_text()
+                        if page_text:
+                            text_parts.append(page_text)
+                    except Exception as page_error:
+                        logging.warning(f"Ошибка страницы {i+1}: {page_error}")
                 
-                content = '\n'.join(text_parts)
+                content = '\n\n'.join(text_parts)
+                file_type = "PDF"
+                logging.info(f"PDF прочитан: {len(content)} символов")
                 
                 if not content.strip():
-                    await update.message.reply_text('⚠️ PDF получен, но текст не распознан (возможно, скан/изображение)')
+                    await update.message.reply_text('⚠️ PDF пустой или содержит только изображения (скан). Попробуйте отправить как фото.')
                     return
                     
             except Exception as pdf_error:
+                logging.error(f"Ошибка PDF: {pdf_error}")
                 await update.message.reply_text(f'❌ Ошибка чтения PDF: {str(pdf_error)}')
                 return
         
-        # Если есть содержимое — отправляем в Kimi
-        if content:
-            # Ограничиваем длину
-            content = content[:5000]
-            
-            # Проверяем, есть ли специальные инструкции в подписи
-            caption = update.message.caption or ""
-            
-            if caption:
-                prompt = f"""Выполни следующие задания по документу:
-{caption}
-
-Содержимое документа:
-{content}
-
-Ответь подробно по-русски."""
-            else:
-                prompt = f"""Проанализируй этот документ и выдели ключевую информацию:
-
-{content}
-
-Ответь по-русски."""
-
-            response = await ask_kimi(prompt)
-            await update.message.reply_text(response)
         else:
-            await update.message.reply_text(f'✅ Файл получен ({doc.file_name})\n\nФормат не поддерживается для анализа. Отправьте .txt или .pdf')
+            logging.warning(f"Неподдерживаемый формат: {mime_type}")
+            await update.message.reply_text(f'❌ Формат не поддерживается: {mime_type}\nОтправьте .txt или .pdf')
+            return
+        
+        # Анализ содержимого
+        if content and content.strip():
+            original_length = len(content)
+            if len(content) > 6000:
+                content = content[:6000]
+                logging.info(f"Текст сокращён с {original_length}")
+            
+            # Получаем подпись с заданием
+            caption = update.message.caption or "Проанализируй документ и выдели ключевую информацию"
+            
+            prompt = create_analysis_prompt(caption, content, file_type)
+            
+            await update.message.reply_text(f'🤖 Анализирую {file_type} ({len(content)} символов)...')
+            response = await ask_kimi(prompt)
+            
+            # Разбиваем длинный ответ
+            if len(response) > 4000:
+                parts = [response[i:i+4000] for i in range(0, len(response), 4000)]
+                for i, part in enumerate(parts, 1):
+                    header = f"📊 *Результат ({i}/{len(parts)}):*\n\n" if i == 1 else f"📄 *Продолжение {i}:*\n\n"
+                    await update.message.reply_text(header + part, parse_mode='Markdown')
+            else:
+                await update.message.reply_text(f"📊 *Результат анализа:*\n\n{response}", parse_mode='Markdown')
+        else:
+            await update.message.reply_text('⚠️ Не удалось извлечь текст из файла.')
             
     except Exception as e:
         logging.error(f"Document error: {e}")
-        await update.message.reply_text('❌ Ошибка при обработке файла')
+        await update.message.reply_text(f'❌ Ошибка: {str(e)}')
 
 # ============ ЗАПУСК ============
 
@@ -250,6 +354,7 @@ def main():
     application.add_handler(MessageHandler(filters.Document.ALL, handle_document))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
     
+    logging.info("Бот запущен")
     application.run_polling()
 
 if __name__ == '__main__':
