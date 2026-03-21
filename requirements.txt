@@ -4,3 +4,5 @@ beautifulsoup4
 lxml
 Pillow
 PyPDF2
+pdf2image
+pytesseract
