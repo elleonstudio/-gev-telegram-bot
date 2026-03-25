@@ -37,21 +37,25 @@ async def handle_paste(update: Update, context: ContextTypes.DEFAULT_TYPE):
     data_to_process = raw_text.replace('/paste', '').strip()
     
     system_paste = (
-        "Ты — технический конвертер. Разбери математическую строку пользователя на части.\n"
-        "ПРАВИЛО РАЗБОРА строки типа '7.5x200+144=1644 vase':\n"
-        "1. Первое число (7.5) -> в поле 'Цена клиенту'.\n"
-        "2. Второе число после x (200) -> в поле 'Количество'.\n"
-        "3. Число после знака + (144) -> в поле 'Доставка'.\n"
-        "4. Текст в конце (vase) -> в поле 'Название'.\n\n"
+        "Ты — технический конвертер данных. Твоя задача: ПРАВИЛЬНО разобрать математические строки.\n\n"
+        "ЛОГИКА РАЗБОРА строки '7.5x200+144=1644 vase':\n"
+        "1. Цена клиенту: 7.5 (первое число).\n"
+        "2. Количество: 200 (число после x).\n"
+        "3. Доставка: 144 (число после +).\n"
+        "4. ИГНОРИРУЙ всё, что после знака = (числа типа 1644, 674, 152 — это не курсы!).\n"
+        "5. Название: vase (текст в конце).\n\n"
+        "КУРСЫ (ВСЕГДА ПИШИ ЭТИ ЗНАЧЕНИЯ):\n"
+        "Курс клиенту: 58\n"
+        "Мой курс: 55\n\n"
         "ФОРМАТ ОТВЕТА:\n"
         "/calc\n\n"
-        "Клиент: [Имя из первой строки]\n\n"
+        "Клиент: [Имя из текста]\n\n"
         "Товар [N]:\nНазвание: [Name]\nКоличество: [Qty]\nЦена клиенту: [Price]\nЗакупка: -\nДоставка: [Logistics]\nРазмеры: - - - -\n\n"
-        "Курс клиенту: [Курс 1]\n"
-        "Мой курс: [Курс 2]"
+        "Курс клиенту: 58\n"
+        "Мой курс: 55"
     )
     
-    prompt = f"Разобщи данные по шаблону /calc:\n{data_to_process}"
+    prompt = f"Разобщи данные строго по шаблону /calc (не считай сам, курсы 58 и 55):\n{data_to_process}"
     
     try:
         result = await ask_kimi(prompt, system_msg=system_paste)
@@ -71,7 +75,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 def main():
     app = Application.builder().token(TELEGRAM_TOKEN).build()
-    app.add_handler(CommandHandler("start", lambda u, c: u.message.reply_text("🤖 Бот готов к работе!")))
+    app.add_handler(CommandHandler("start", lambda u, c: u.message.reply_text("🤖 Бот готов! Жду твой /paste")))
     app.add_handler(MessageHandler(filters.Regex(r'^/paste'), handle_paste))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     app.run_polling(drop_pending_updates=True)
