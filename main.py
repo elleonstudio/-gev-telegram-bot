@@ -163,7 +163,7 @@ async def send_to_airtable(parsed_data: dict):
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text
     
-    # 1. Запись в Airtable (если есть правильный тег)
+    # 1. Запись в Airtable
     if "AIRTABLE_EXPORT_START" in text:
         msg = await update.message.reply_text("📥 Вижу отчёт GS Orders. Записываю в базу...")
         parsed_data = parse_airtable_export(text)
@@ -184,7 +184,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await msg.edit_text(f"❌ Ошибка записи в Airtable: {info}")
         return
 
-    # 2. БЛОКИРУЕМ БОЛТОВНИ ИИ: Если это просто инвойс без тегов, молчим!
+    # 2. БЛОКИРУЕМ БОЛТОВНИ ИИ
     if "COMMERCIAL INVOICE" in text or "ТОВАРНАЯ ВЕДОМОСТЬ" in text:
         return 
 
@@ -196,28 +196,57 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         caption = update.message.caption or ""
-        if caption.lower().strip().startswith('/hs'):
-            msg = await update.message.reply_text('⏳ Анализирую товар и вероятные материалы для ТН ВЭД...')
+        
+        # 1. Сценарий: Парсинг поставщика с 1688
+        if caption.lower().strip().startswith('/1688'):
+            msg = await update.message.reply_text('⏳ Читаю иероглифы, перевожу и ищу данные поставщика...')
             file = await context.bot.get_file(update.message.photo[-1].file_id)
             buf = BytesIO()
             await file.download_to_memory(buf)
             
-            # УНИВЕРСАЛЬНЫЙ СИСТЕМНЫЙ ПРОМПТ БРОКЕРА
-            system_broker = (
-                "Ты профессиональный таможенный декларант ЕАЭС с 15-летним стажем. "
-                "Твое главное правило: по фотографии часто невозможно на 100% определить состав товара "
-                "(например: стекло или фарфор, трикотаж или тканый текстиль, пластик или металл, натуральная кожа или кожзам). "
-                "Поэтому ты ВСЕГДА предполагаешь 2-3 наиболее вероятных материала для товара на фото "
-                "и выдаешь разные коды ТН ВЭД для каждого из этих материалов, чтобы клиент мог выбрать точный."
+            system_1688 = (
+                "Ты эксперт по китайским юридическим документам и маркетплейсам (1688, Taobao). "
+                "Твоя задача — извлекать точные юридические и контактные данные со скриншотов и делать качественный перевод на английский."
             )
             
-            # УНИВЕРСАЛЬНЫЙ ЗАПРОС
+            prompt_1688 = (
+                "Найди на скриншоте данные продавца и выведи их строго в таком формате. "
+                "ОБЯЗАТЕЛЬНО переведи название компании и адрес с китайского на английский язык. "
+                "Ищи налоговый номер (统一社会信用代码 - обычно 18 символов).\n"
+                "Если чего-то нет на фото, напиши 'Не найдено'.\n\n"
+                "🏢 Компания (CN): [Оригинальное китайское название]\n"
+                "🏢 Компания (EN): [Перевод названия на английский]\n"
+                "📋 Tax ID: [Налоговый номер]\n"
+                "📍 Адрес (CN): [Оригинальный адрес на китайском]\n"
+                "📍 Адрес (EN): [Перевод адреса на английский]\n"
+                "📞 Телефон: [Номер телефона]"
+            )
+            
+            res = await ask_kimi(prompt_1688, image_b64=base64.b64encode(buf.getvalue()).decode('utf-8'), system_msg=system_1688)
+            return await msg.edit_text(f"📝 **Данные поставщика 1688:**\n\n{res}", parse_mode='Markdown')
+
+        # 2. Сценарий: Умный подбор кодов ТН ВЭД (Скриншоты витрин + Фото)
+        if caption.lower().strip().startswith('/hs'):
+            msg = await update.message.reply_text('⏳ Читаю текст витрины и подбираю коды ТН ВЭД...')
+            file = await context.bot.get_file(update.message.photo[-1].file_id)
+            buf = BytesIO()
+            await file.download_to_memory(buf)
+            
+            system_broker = (
+                "Ты профессиональный таможенный декларант ЕАЭС. Ты умеешь анализировать как обычные фото товаров, "
+                "так и скриншоты с витрин китайских магазинов (1688, Taobao).\n"
+                "1. Если на фото есть текст (название товара, характеристики на китайском или английском), "
+                "ОБЯЗАТЕЛЬНО прочитай и переведи его, чтобы точно узнать состав (например, 100% хлопок, ПВХ, керамика). "
+                "Если материал четко указан в тексте — выдай точные коды именно для этого материала.\n"
+                "2. Если текста нет и материал по фото неочевиден — выдай 2-3 варианта для разных возможных материалов."
+            )
+            
             user_prompt = (
-                f"Подбери 3 наиболее вероятных 10-значных кода ТН ВЭД ЕАЭС для товара на фото.\n"
-                f"Дополнительное описание от клиента: {caption.replace('/hs', '').strip()}\n\n"
-                f"Если материал неочевиден, обязательно дай коды для разных материалов (например: 'Если это керамика — код Х, если стекло — код Y').\n\n"
+                f"Подбери 2-3 наиболее вероятных 10-значных кода ТН ВЭД ЕАЭС.\n"
+                f"Доп. описание от клиента: {caption.replace('/hs', '').strip()}\n\n"
+                f"Внимательно изучи текст на картинке. Если нашел состав/материал — опирайся на него!\n\n"
                 f"Формат ответа СТРОГО такой:\n"
-                f"КОД: [10 цифр]\nОПИСАНИЕ: [Какой это товар и для какого МАТЕРИАЛА/СОСТАВА применяется этот код]\n"
+                f"КОД: [10 цифр]\nОПИСАНИЕ: [Какой это товар. Обязательно укажи, из какого он материала. Если материал прочитан со скриншота — напиши об этом.]\n"
             )
             
             res = await ask_kimi(user_prompt, image_b64=base64.b64encode(buf.getvalue()).decode('utf-8'), system_msg=system_broker)
@@ -228,6 +257,7 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 if len(code) >= 4: final_msg += f"👉 [Код {code}](https://www.alta.ru/tnved/code/{code}/)\n"
             return await msg.edit_text(final_msg, parse_mode='Markdown', disable_web_page_preview=True)
 
+        # 3. Сценарий: Просто фото (Создание имени файла)
         msg = await update.message.reply_text('⏳ Обработка фото для создания имени файла...')
         file = await context.bot.get_file(update.message.photo[-1].file_id)
         buf = BytesIO()
@@ -238,6 +268,7 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not new_name.endswith('.pdf'): new_name += '.pdf'
         if len(new_name) < 10: new_name = f"Товар_Unknown_{barcode_num if barcode_num else '000'}.pdf"
         await msg.edit_text('\n'.join(build_response_lines(re.sub(r'_{2,}', '_', new_name), barcode_num, article)), parse_mode='Markdown', disable_web_page_preview=True)
+        
     except Exception as e:
         await update.message.reply_text(f'❌ Ошибка: {str(e)[:200]}')
 
