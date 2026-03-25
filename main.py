@@ -103,20 +103,21 @@ async def send_to_airtable(parsed_data: dict):
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text
 
-    # КОМАНДА /paste ДЛЯ GS ORDERS
+    # КОМАНДА /paste - ГЕНЕРАЦИЯ СООБЩЕНИЯ С КОМАНДОЙ /calc В НАЧАЛЕ
     if text.startswith('/paste'):
         raw_input = text.replace('/paste', '').strip()
-        msg = await update.message.reply_text("🏗 Формирую шаблон для GS Orders...")
+        msg = await update.message.reply_text("🏗 Подготавливаю сообщение для GS Orders...")
         
         system_paste = (
-            "Ты помощник для формирования заказов. Твоя задача — расставить данные пользователя строго по шаблону GS Orders.\n"
-            "Шаблон:\nКлиент: [Имя/ID]\n\nТовар [N]:\nНазвание: [Name]\nКоличество: [Qty]\nЦена клиенту: [Price]\nЗакупка: [Buy]\nДоставка: [Logistics]\nРазмеры: - - - -\n\nВ конце: Курс клиенту: [X]\nМой курс: [Y]"
+            "Ты помощник для формирования заказов. Твоя задача — строго переформатировать данные пользователя.\n"
+            "ПРАВИЛА:\n"
+            "1. Сообщение ОБЯЗАТЕЛЬНО должно начинаться со строки: /calc\n"
+            "2. Поле 'Закупка' всегда должно быть '-'.\n"
+            "3. Размеры всегда '- - - -'.\n"
+            "4. Шаблон:\n/calc\n\nКлиент: [ID]\n\nТовар [N]:\nНазвание: [Name]\nКоличество: [Qty]\nЦена клиенту: [Price]\nЗакупка: -\nДоставка: [Logistics]\nРазмеры: - - - -\n\nВ конце: Курс клиенту: [X]\nМой курс: [Y]"
         )
         
-        prompt_paste = (
-            f"Преврати это в шаблон GS Orders:\n{raw_input}\n\n"
-            "Важно: Названия товаров пиши на русском. Если цена/доставка не указаны, ставь '-'. Размеры всегда '- - - -'."
-        )
+        prompt_paste = f"Преврати это в шаблон для GS Orders (начни с /calc):\n{raw_input}"
         
         res = await ask_kimi(prompt_paste, system_msg=system_paste)
         return await msg.edit_text(res)
@@ -129,7 +130,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         else: await msg.edit_text(f"❌ Ошибка: {info}")
         return
 
-    if "COMMERCIAL INVOICE" in text or "КЛИЕНТ:" in text.upper(): return 
+    if "COMMERCIAL INVOICE" in text or text.startswith('/calc'): return 
 
     msg = await update.message.reply_text('⏳ Думаю...')
     resp = await ask_kimi(text)
@@ -138,7 +139,6 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         caption = update.message.caption or ""
-        # 1. 1688
         if caption.lower().strip().startswith('/1688'):
             product_cat = caption.replace('/1688', '').strip()
             msg = await update.message.reply_text('⏳ Данные поставщика...')
@@ -148,7 +148,6 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
             res = await ask_kimi(prompt, image_b64=base64.b64encode(buf.getvalue()).decode('utf-8'), system_msg="Эксперт 1688.")
             return await msg.edit_text(res, parse_mode='Markdown')
 
-        # 2. HS CODE
         if caption.lower().strip().startswith('/hs'):
             msg = await update.message.reply_text('⏳ Коды ТН ВЭД...')
             file = await context.bot.get_file(update.message.photo[-1].file_id)
@@ -160,7 +159,6 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
             for code in set(codes): final_msg += f"👉 [Код {code}](https://www.alta.ru/tnved/code/{code}/)\n"
             return await msg.edit_text(final_msg, parse_mode='Markdown', disable_web_page_preview=True)
 
-        # 3. LABEL
         msg = await update.message.reply_text('⏳ Обработка...')
         file = await context.bot.get_file(update.message.photo[-1].file_id)
         buf = BytesIO(); await file.download_to_memory(buf)
