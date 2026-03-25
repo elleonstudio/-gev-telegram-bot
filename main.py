@@ -19,17 +19,32 @@ logger = logging.getLogger(__name__)
 TELEGRAM_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
 KIMI_API_KEY = os.getenv('KIMI_API_KEY')
 
-# ЕДИНЫЙ, СТРОГИЙ СИСТЕМНЫЙ ПРОМПТ ДЛЯ ГЕНЕРАЦИИ ИМЕН ФАЙЛОВ
+# СТРОГИЙ ПРОМПТ ДЛЯ ГЕНЕРАЦИИ ИМЕН ФАЙЛОВ
 SYSTEM_MSG_NAMING = (
     "Ты полезный ИИ-ассистент, специализирующийся на создании стандартизированных имен файлов для товаров.\n\n"
     "СТРОГИЕ ПРАВИЛА И СТРУКТУРА ИМЕНИ ФАЙЛА:\n"
     "1. Твой ответ должен быть СТРОГО одним именем файла в формате: 中文_English_Размер_Артикул_Штрихкод.pdf\n"
-    "2. Если ты не можешь определить какую-то часть (например, размер), пропусти её и соответствующий разделитель '_' (например, 中文_English_Артикул_Штрихкод.pdf). Не используй заглушки вроде 'None' или 'Unknown'.\n"
+    "2. Если ты не можешь определить какую-то часть (например, размер), пропусти её и соответствующий разделитель '_' (например: 中文_English_Артикул_Штрихкод.pdf). Не используй заглушки вроде 'None' или 'Unknown'.\n"
     "3. 中文 (Китайский): Ты ОБЯЗАН перевести описание товара на китайский язык (简体中文).\n"
     "4. English (Английский): Ты ОБЯЗАН перевести описание товара на английский язык.\n"
     "5. Не добавляй никаких других слов, тегов, объяснений или знаков препинания до или после имени файла.\n"
     "6. Не изменяй артикул и штрихкод, если они предоставлены."
 )
+
+def is_valid_ean13(barcode: str) -> bool:
+    """Математическая проверка контрольной суммы штрих-кода EAN-13"""
+    if not barcode or len(barcode) != 13 or not barcode.isdigit():
+        return False
+    
+    digits = [int(x) for x in barcode]
+    checksum = digits.pop()
+    
+    sum_even = sum(digits[1::2]) * 3
+    sum_odd = sum(digits[0::2])
+    total = sum_even + sum_odd
+    
+    expected_checksum = (10 - (total % 10)) % 10
+    return checksum == expected_checksum
 
 def clean_response(text: str) -> str:
     """Удаляет лишний мусор и Markdown из ответа"""
@@ -42,27 +57,9 @@ def clean_response(text: str) -> str:
     for pattern in garbage:
         text = re.sub(pattern, '', text, flags=re.IGNORECASE | re.MULTILINE)
     
-    # Удаляем Markdown
     text = text.replace('`', '').replace('***', '').replace('**', '').replace('*', '')
-    
     lines = [l.strip() for l in text.split('\n') if l.strip()]
     return ' '.join(lines)
-
-def is_valid_ean13(barcode: str) -> bool:
-    """Математическая проверка контрольной суммы штрих-кода EAN-13"""
-    if not barcode or len(barcode) != 13 or not barcode.isdigit():
-        return False
-    
-    digits = [int(x) for x in barcode]
-    checksum = digits.pop()
-    
-    # Считаем сумму по алгоритму EAN-13
-    sum_even_idx = sum(digits[0::2]) # Индексы 0, 2, 4... (нечетные позиции)
-    sum_odd_idx = sum(digits[1::2]) * 3 # Индексы 1, 3, 5... (четные позиции) умножаем на 3
-    total = sum_odd_idx + sum_even_idx
-    
-    expected_checksum = (10 - (total % 10)) % 10
-    return checksum == expected_checksum
 
 async def ask_kimi(prompt: str, image_b64: str = None, system_msg: str = None) -> str:
     """Асинхронный запрос к API Moonshot"""
@@ -94,7 +91,7 @@ async def ask_kimi(prompt: str, image_b64: str = None, system_msg: str = None) -
         data = {
             'model': model, 
             'messages': messages, 
-            'temperature': 0.05, 
+            'temperature': 0.05,
             'max_tokens': 300
         }
         
@@ -117,7 +114,6 @@ async def extract_image_data(image: Image.Image):
     text = ""
     article = ""
     
-    # 1. Штрихкод
     try:
         codes = decode(image.convert('L'))
         if codes:
@@ -125,14 +121,12 @@ async def extract_image_data(image: Image.Image):
     except Exception as e:
         logger.warning(f"Barcode extraction warning: {e}")
 
-    # 2. Текст (OCR)
     try:
         custom_config = r'--oem 3 --psm 6'
         text = pytesseract.image_to_string(image, lang='rus+eng+chi_sim', config=custom_config)
     except Exception as e:
         logger.warning(f"OCR warning: {e}")
 
-    # 3. Артикул из текста
     patterns = [
         r'Артикул[:\s]+(\d+)',
         r'Артикул[:\s]*(\d+)',
@@ -169,7 +163,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     welcome_text = (
         "🤖 Привет! Я твой ассистент по товарам.\n\n"
         "📁 **Сгенерировать имя файла:** Отправь фото или PDF с этикеткой.\n"
-        "📦 **Подобрать HS code (ЕАЭС):** Отправь фото с подписью `/hs [описание]`."
+        "📦 **Подобрать HS code (ЕАЭС/Армения):** Отправь фото с подписью `/hs [описание]`."
     )
     await update.message.reply_text(welcome_text, parse_mode='Markdown')
 
@@ -226,23 +220,23 @@ async def handle_hs(update: Update, context: ContextTypes.DEFAULT_TYPE):
         logger.error(f"HS error: {e}")
         await update.message.reply_text(f'❌ Ошибка: {str(e)[:200]}')
 
-async def build_response_message(new_name: str, barcode_num: str, article: str) -> str:
-    """Формирует итоговое текстовое сообщение со ссылками и проверками"""
+def build_response_lines(new_name, barcode_num, article):
+    """Формирует текстовый ответ с проверками штрих-кода и ссылками WB"""
     response_lines = [f"📄 `{new_name}`"]
     
     if barcode_num:
         if is_valid_ean13(barcode_num):
-            response_lines.insert(0, f"✅ Штрих-код: `{barcode_num}` (Формат EAN-13 верен)")
+            response_lines.insert(0, f"✅ Штрих-код: {barcode_num} (Читается + формат EAN-13 верен)")
         else:
-            response_lines.insert(0, f"⚠️ Штрих-код: `{barcode_num}` (ОШИБКА ФОРМАТА! Возможно, не прочитается на складе)")
+            response_lines.insert(0, f"⚠️ Штрих-код: {barcode_num} (Читается, НО ОШИБКА ФОРМАТА! Возможно, сгенерирован неверно)")
     else:
         response_lines.insert(0, "❌ Штрих-код: НЕ НАЙДЕН НА ИЗОБРАЖЕНИИ")
 
     if article:
         wb_link = f"https://www.wildberries.ru/catalog/{article}/detail.aspx"
-        response_lines.insert(1, f"✅ Артикул: `{article}` 👉 [Открыть карточку WB]({wb_link})")
+        response_lines.insert(1, f"✅ Артикул: {article} 👉 [Посмотреть на WB]({wb_link})")
         
-    return '\n'.join(response_lines)
+    return response_lines
 
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Обработка фото для переименования"""
@@ -258,7 +252,7 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         barcode_num, text, article = await extract_image_data(image)
         prompt = await get_naming_prompt(text, barcode_num, article)
-        
+
         image_b64 = base64.b64encode(buf.getvalue()).decode('utf-8')
         new_name = await ask_kimi(prompt, image_b64=image_b64, system_msg=SYSTEM_MSG_NAMING)
         
@@ -270,8 +264,8 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if len(new_name) < 10:
             new_name = f"Товар_Unknown_{barcode_num if barcode_num else '000'}.pdf"
         
-        final_msg = await build_response_message(new_name, barcode_num, article)
-        await msg.edit_text(final_msg, parse_mode='Markdown', disable_web_page_preview=True)
+        response_lines = build_response_lines(new_name, barcode_num, article)
+        await msg.edit_text('\n'.join(response_lines), parse_mode='Markdown', disable_web_page_preview=True)
         
     except Exception as e:
         logger.error(f"Photo error: {e}")
@@ -307,8 +301,69 @@ async def handle_doc(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 new_name = re.sub(r'[\\/*?:"\u003c\u003e|]', '', new_name)
                 new_name = re.sub(r'_{2,}', '_', new_name)
                 
-                final_msg = await build_response_message(new_name, barcode_num, article)
-                await msg.edit_text(final_msg, parse_mode='Markdown', disable_web_page_preview=True)
+                response_lines = build_response_lines(new_name, barcode_num, article)
+                await msg.edit_text('\n'.join(response_lines), parse_mode='Markdown', disable_web_page_preview=True)
                 return
             except Exception:
                 await msg.edit_text('❌ Поддерживаются только .pdf или изображения')
+                return
+
+        await msg.edit_text('⏳ Обработка PDF (распознавание первой страницы)...')
+        
+        buf.seek(0)
+        images = convert_from_bytes(buf.read(), dpi=250, first_page=1, last_page=1)
+        if images:
+            img = images[0]
+            barcode_num, text, article = await extract_image_data(img)
+        else:
+            await msg.edit_text('❌ Не удалось открыть PDF')
+            return
+
+        prompt = await get_naming_prompt(text, barcode_num, article)
+        
+        new_name = await ask_kimi(prompt, system_msg=SYSTEM_MSG_NAMING)
+        
+        new_name = new_name.strip()
+        if not new_name.endswith('.pdf'): new_name += '.pdf'
+        new_name = re.sub(r'[\\/*?:"\u003c\u003e|]', '', new_name)
+        new_name = re.sub(r'_{2,}', '_', new_name)
+        
+        if len(new_name) < 10:
+            new_name = f"Товар_Unknown_{barcode_num if barcode_num else '000'}.pdf"
+
+        await msg.delete()
+        
+        response_lines = build_response_lines(new_name, barcode_num, article)
+        await update.message.reply_text('\n'.join(response_lines), parse_mode='Markdown', disable_web_page_preview=True)
+        
+        buf.seek(0)
+        await update.message.reply_document(
+            document=InputFile(buf, filename=new_name),
+            caption=new_name
+        )
+        
+    except Exception as e:
+        logger.error(f"Doc error: {e}")
+        await update.message.reply_text(f'❌ Ошибка: {str(e)[:200]}')
+
+async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработка простого текста"""
+    msg = await update.message.reply_text('⏳ Думаю...')
+    resp = await ask_kimi(update.message.text)
+    await msg.edit_text(resp[:4000])
+
+def main():
+    app = Application.builder().token(TELEGRAM_TOKEN).build()
+    
+    app.add_handler(CommandHandler('start', start))
+    app.add_handler(CommandHandler('hs', handle_hs))
+    
+    app.add_handler(MessageHandler(filters.PHOTO & ~filters.COMMAND, handle_photo))
+    app.add_handler(MessageHandler(filters.Document.ALL, handle_doc))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
+    
+    logger.info("Бот запущен и готов к работе!")
+    app.run_polling(drop_pending_updates=True)
+
+if __name__ == '__main__':
+    main()
