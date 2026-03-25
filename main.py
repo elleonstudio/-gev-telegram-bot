@@ -4,6 +4,7 @@ import base64
 import re
 import aiohttp
 from io import BytesIO
+from datetime import datetime
 
 from telegram import Update, InputFile
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
@@ -11,276 +12,219 @@ from pdf2image import convert_from_bytes
 from PIL import Image
 import pytesseract
 from pyzbar.pyzbar import decode
+from pyairtable import Api
 
 # Настройка логирования
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+# Токены (Telegram и Kimi берутся из ENV сервера)
 TELEGRAM_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
 KIMI_API_KEY = os.getenv('KIMI_API_KEY')
 
-# СТРОГИЙ ПРОМПТ ДЛЯ ГЕНЕРАЦИИ ИМЕН ФАЙЛОВ
+# Токены Airtable (Baza 2026)
+AIRTABLE_TOKEN = "pati6TFqzPlZaI08o.88a1e98775f215fb08b58c2fde28b38acebc5f4556c8eb850b9ca9930dbcf607"
+AIRTABLE_BASE_ID = "appRIlSL63Kxh6iWX" # Чистый ID базы
+AIRTABLE_TABLE_NAME = "Закупка"
+
+# Системные промпты
 SYSTEM_MSG_NAMING = (
-    "Ты полезный ИИ-ассистент, специализирующийся на создании стандартизированных имен файлов для товаров.\n\n"
-    "СТРОГИЕ ПРАВИЛА И СТРУКТУРА ИМЕНИ ФАЙЛА:\n"
-    "1. Твой ответ должен быть СТРОГО одним именем файла в формате: 中文_English_Размер_Артикул_Штрихкод.pdf\n"
-    "2. Если ты не можешь определить какую-то часть (например, размер), пропусти её и соответствующий разделитель '_' (например: 中文_English_Артикул_Штрихкод.pdf). Не используй заглушки вроде 'None' или 'Unknown'.\n"
-    "3. 中文 (Китайский): Ты ОБЯЗАН перевести описание товара на китайский язык (简体中文).\n"
-    "4. English (Английский): Ты ОБЯЗАН перевести описание товара на английский язык.\n"
-    "5. Не добавляй никаких других слов, тегов, объяснений или знаков препинания до или после имени файла.\n"
-    "6. Не изменяй артикул и штрихкод, если они предоставлены."
+    "Ты ассистент по созданию имен файлов. Формат: 中文_English_Размер_Артикул_Штрихкод.pdf\n"
+    "Перевод на китайский и английский ОБЯЗАТЕЛЕН."
 )
 
 def is_valid_ean13(barcode: str) -> bool:
-    """Математическая проверка контрольной суммы штрих-кода EAN-13"""
-    if not barcode or len(barcode) != 13 or not barcode.isdigit():
-        return False
-    
+    if not barcode or len(barcode) != 13 or not barcode.isdigit(): return False
     digits = [int(x) for x in barcode]
     checksum = digits.pop()
-    
     sum_even = sum(digits[1::2]) * 3
     sum_odd = sum(digits[0::2])
     total = sum_even + sum_odd
-    
-    expected_checksum = (10 - (total % 10)) % 10
-    return checksum == expected_checksum
+    return checksum == (10 - (total % 10)) % 10
 
 def clean_response(text: str) -> str:
-    """Удаляет лишний мусор из ответа"""
-    garbage = [
-        r'^\d+\.', r'ОПРЕДЕЛИ.*?:', r'ВЫБЕРИ.*?:', r'ВЫПОЛНИ.*?:', 
-        r'АНАЛИЗИРУЮ.*?:', r'РАССУЖДАЮ.*?:', r'---', r'===', 
-        r'ВЫВОД:', r'РЕЗУЛЬТАТ:', r'ОТВЕТ:', r'\*\*\*', r'•',
-        r'список\s*[-–]', r'Проблемы:.*', r'Размеры:.*', r'Проверка:.*',
-    ]
-    for pattern in garbage:
-        text = re.sub(pattern, '', text, flags=re.IGNORECASE | re.MULTILINE)
-    
-    text = text.replace('`', '').replace('***', '').replace('**', '').replace('*', '')
+    text = re.sub(r'(`|\*+)', '', text)
     lines = [l.strip() for l in text.split('\n') if l.strip()]
     return ' '.join(lines)
 
 async def ask_kimi(prompt: str, image_b64: str = None, system_msg: str = None) -> str:
-    """Асинхронный запрос к API Moonshot"""
-    if not system_msg:
-        system_msg = 'Ты полезный ИИ-ассистент.'
-
-    try:
-        headers = {
-            'Authorization': f'Bearer {KIMI_API_KEY}', 
-            'Content-Type': 'application/json'
-        }
-        
-        if image_b64:
-            messages = [
-                {'role': 'system', 'content': system_msg},
-                {'role': 'user', 'content': [
-                    {'type': 'text', 'text': prompt}, 
-                    {'type': 'image_url', 'image_url': {'url': f'data:image/jpeg;base64,{image_b64}'}}
-                ]}
-            ]
-            model = 'moonshot-v1-8k-vision-preview'
-        else:
-            messages = [
-                {'role': 'system', 'content': system_msg}, 
-                {'role': 'user', 'content': prompt}
-            ]
-            model = 'moonshot-v1-8k'
-        
-        data = {
-            'model': model, 
-            'messages': messages, 
-            'temperature': 0.05,
-            'max_tokens': 300
-        }
-        
-        async with aiohttp.ClientSession() as session:
-            async with session.post('https://api.moonshot.cn/v1/chat/completions', headers=headers, json=data, timeout=60) as response:
-                if response.status == 200:
-                    resp_json = await response.json()
-                    return clean_response(resp_json['choices'][0]['message']['content'])
-                else:
-                    error_text = await response.text()
-                    logger.error(f"API Error {response.status}: {error_text}")
-                    return f"Error_{response.status}"
-    except Exception as e:
-        logger.error(f"Kimi Request failed: {e}")
-        return f"Error_API_Request"
+    headers = {'Authorization': f'Bearer {KIMI_API_KEY}', 'Content-Type': 'application/json'}
+    model = 'moonshot-v1-8k-vision-preview' if image_b64 else 'moonshot-v1-8k'
+    
+    content = [{'type': 'text', 'text': prompt}]
+    if image_b64: content.append({'type': 'image_url', 'image_url': {'url': f'data:image/jpeg;base64,{image_b64}'}})
+    
+    messages = [{'role': 'system', 'content': system_msg or 'Ты ИИ-ассистент.'}, {'role': 'user', 'content': content}]
+    data = {'model': model, 'messages': messages, 'temperature': 0.05}
+    
+    async with aiohttp.ClientSession() as session:
+        async with session.post('https://api.moonshot.cn/v1/chat/completions', headers=headers, json=data) as resp:
+            if resp.status == 200:
+                res = await resp.json()
+                return clean_response(res['choices'][0]['message']['content'])
+            return f"Error_{resp.status}"
 
 async def extract_image_data(image: Image.Image):
-    """Единая функция извлечения данных из картинки"""
-    barcode_num = ""
-    text = ""
-    article = ""
-    
+    barcode_num, text, article = "", "", ""
     try:
         codes = decode(image.convert('L'))
-        if codes:
-            barcode_num = codes[0].data.decode('utf-8')
-    except Exception as e:
-        logger.warning(f"Barcode extraction warning: {e}")
+        if codes: barcode_num = codes[0].data.decode('utf-8')
+    except: pass
 
     try:
-        custom_config = r'--oem 3 --psm 6'
-        text = pytesseract.image_to_string(image, lang='rus+eng+chi_sim', config=custom_config)
-    except Exception as e:
-        logger.warning(f"OCR warning: {e}")
+        text = pytesseract.image_to_string(image, lang='rus+eng+chi_sim', config=r'--oem 3 --psm 6')
+    except: pass
 
-    patterns = [
-        r'Артикул[:\s]+(\d+)',
-        r'Артикул[:\s]*(\d+)',
-        r'Article[:\s]+(\d+)',
-        r'арт\.?[:\s]*(\d+)',
-    ]
-    for pattern in patterns:
+    for pattern in [r'Артикул[:\s]+(\d+)', r'Артикул[:\s]*(\d+)', r'Article[:\s]+(\d+)']:
         match = re.search(pattern, text, re.IGNORECASE)
         if match:
             article = match.group(1)
             break
-
     return barcode_num, text, article
 
-async def get_naming_prompt(text: str, barcode_num: str, article: str) -> str:
-    """Генерирует структурированный пользовательский промпт для переименования"""
-    return (
-        f"Создай строго структурированное имя файла для товара на основе предоставленных данных.\n\n"
-        f"ВХОДНЫЕ ДАННЫЕ:\n"
-        f"- Распознанный текст этикетки:\n\"{text[:2000]}\"\n"
-        f"- Штрих-код: {barcode_num if barcode_num else 'не найден'}\n"
-        f"- Артикул: {article if article else 'не найден'}\n\n"
-        f"ПОРЯДОК ДЕЙСТВИЙ ДЛЯ ТЕБЯ:\n"
-        f"1. Пойми, что это за товар.\n"
-        f"2. ПЕРЕВЕДИ на китайский (简体中文).\n"
-        f"3. ПЕРЕВЕДИ на английский.\n"
-        f"4. Найди размер из текста (например, 200x100).\n"
-        f"5. Сформируй итоговое имя файла: 中文_English_Размер_Артикул_Штрихкод.pdf.\n"
-        f"ОТВЕТЬ ТОЛЬКО ИМЕНЕМ ФАЙЛА:"
-    )
-
 def build_response_lines(new_name, barcode_num, article):
-    """Формирует текстовый ответ с проверками штрих-кода и ссылками WB"""
     response_lines = [f"📄 `{new_name}`"]
-    
     if barcode_num:
         if is_valid_ean13(barcode_num):
             response_lines.insert(0, f"✅ Штрих-код: {barcode_num} (Читается + формат EAN-13 верен)")
         else:
-            response_lines.insert(0, f"⚠️ Штрих-код: {barcode_num} (Читается, НО ОШИБКА ФОРМАТА! Возможно, сгенерирован неверно)")
+            response_lines.insert(0, f"⚠️ Штрих-код: {barcode_num} (Читается, НО ОШИБКА ФОРМАТА!)")
     else:
         response_lines.insert(0, "❌ Штрих-код: НЕ НАЙДЕН НА ИЗОБРАЖЕНИИ")
 
     if article:
         wb_link = f"https://www.wildberries.ru/catalog/{article}/detail.aspx"
         response_lines.insert(1, f"✅ Артикул: {article} 👉 [Посмотреть на WB]({wb_link})")
-        
     return response_lines
 
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    welcome_text = (
-        "🤖 Привет! Я твой ассистент по товарам.\n\n"
-        "📁 **Сгенерировать имя файла:** Отправь фото или PDF с этикеткой.\n"
-        "📦 **Подобрать HS code (ЕАЭС):** Отправь фото с подписью `/hs [описание]`."
-    )
-    await update.message.reply_text(welcome_text, parse_mode='Markdown')
+# --- ИНТЕГРАЦИЯ С AIRTABLE ---
 
-async def handle_hs_text_error(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Если пользователь отправил команду /hs без фото"""
-    await update.message.reply_text('❌ Отправь команду /hs вместе с фотографией товара (прикрепи фото и напиши /hs в описании).')
+def parse_airtable_export(text: str) -> dict:
+    """Моментально извлекает данные из блока GS Orders без участия ИИ"""
+    match = re.search(r'AIRTABLE_EXPORT_START(.*?)AIRTABLE_EXPORT_END', text, re.DOTALL)
+    if not match: return {}
+    
+    parsed = {}
+    for line in match.group(1).strip().split('\n'):
+        if ':' in line:
+            key, val = line.split(':', 1)
+            parsed[key.strip()] = val.strip()
+    return parsed
 
-async def process_hs(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Основная логика для обработки HS кодов"""
+async def send_to_airtable(parsed_data: dict):
+    """Отправка распарсенных данных в базу ERAZ ERP (Baza 2026)"""
     try:
-        msg = await update.message.reply_text('⏳ Изучаю товар и подбираю коды ТН ВЭД (ЕАЭС)...')
+        api = Api(AIRTABLE_TOKEN)
+        table = api.table(AIRTABLE_BASE_ID, AIRTABLE_TABLE_NAME)
         
-        photo = update.message.photo[-1]
-        file = await context.bot.get_file(photo.file_id)
-        
-        buf = BytesIO()
-        await file.download_to_memory(buf)
-        image_b64 = base64.b64encode(buf.getvalue()).decode('utf-8')
-        
-        caption = update.message.caption if update.message.caption else ""
-        # Убираем команду из описания, чтобы передать нейросети чистый текст
-        user_desc = re.sub(r'(?i)/hs', '', caption).strip()
-        
-        system_msg_hs = "Ты опытный таможенный декларант ЕАЭС (Армения)."
-        prompt_hs = f"""Внимательно изучи фото товара. 
-Дополнительное описание: "{user_desc if user_desc else 'нет описания'}".
+        # Конвертация даты DD.MM.YYYY -> YYYY-MM-DD для Airtable
+        raw_date = parsed_data.get("Date", "")
+        formatted_date = datetime.now().strftime("%Y-%m-%d")
+        if "." in raw_date:
+            d, m, y = raw_date.split(".")
+            formatted_date = f"{y}-{m}-{d}"
 
-Определи, что это за товар, из какого материала он сделан, и подбери 2-3 наиболее вероятных кода ТН ВЭД ЕАЭС.
+        # Нормализация имени клиента из Инвойса (ZAVEN8291-260325 -> Zaven-8291)
+        invoice = parsed_data.get("Invoice_ID", "")
+        client_name = ""
+        match = re.match(r'^([a-zA-Z]+)-?(\d+)', invoice)
+        if match:
+            client_name = f"{match.group(1).capitalize()}-{match.group(2)}"
 
-ОТВЕТ ДАЙ СТРОГО В ТАКОМ ФОРМАТЕ для каждого варианта:
-КОД: [только 10 цифр кода без пробелов и точек]
-ОПИСАНИЕ: [кратко, почему этот код подходит]"""
-
-        kimi_response = await ask_kimi(prompt_hs, image_b64=image_b64, system_msg=system_msg_hs)
+        # Формируем запись строго по твоим колонкам
+        record = {
+            "Код Карго": invoice,
+            "Дата": formatted_date,
+            "Сумма (¥)": float(parsed_data.get("Sum_Client_CNY", 0)),
+            "Реал Цена Закупки (¥)": float(parsed_data.get("Real_Purchase_CNY", 0)),
+            "Курс Клиент": float(parsed_data.get("Client_Rate", 0)),
+            "Курс Реал": float(parsed_data.get("Real_Rate", 0)),
+            "Расход материалов (¥)": float(parsed_data.get("China_Logistics_CNY", 0)),
+            "Кол-во пакетов/коробок/рулонов ШК": int(parsed_data.get("FF_Boxes_Qty", 0)),
+            "Заказ": f"Количество товаров: {parsed_data.get('Total_Qty', 0)} шт.",
+            "Карго Статус": "Заказано"
+        }
         
-        # Перехват ошибок API (включая лимит 429)
-        if kimi_response.startswith("Error"):
-            if "429" in kimi_response:
-                await msg.edit_text("❌ Ошибка 429: Лимит запросов к нейросети Kimi. Подожди пару минут и попробуй снова.")
-            else:
-                await msg.edit_text(f"❌ Ошибка API при анализе фото: {kimi_response.replace('Error_', '')}")
+        # Если удалось вытащить клиента, привязываем его
+        if client_name:
+            record["Клиент"] = client_name # Используем typecast=True для автоматической связи
+
+        # typecast=True обязателен для связи Linked Records (Клиент) и дат!
+        table.create(record, typecast=True)
+        return True, client_name
+    except Exception as e:
+        logger.error(f"Airtable Error: {e}")
+        return False, str(e)
+
+# --- ОБРАБОТЧИКИ ТЕЛЕГРАМ ---
+
+async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = update.message.text
+    
+    # 1. Ловим экспорт в Airtable
+    if "AIRTABLE_EXPORT_START" in text:
+        msg = await update.message.reply_text("📥 Вижу отчёт GS Orders. Записываю в базу...")
+        parsed_data = parse_airtable_export(text)
+        
+        if not parsed_data:
+            await msg.edit_text("❌ Ошибка: не удалось прочитать блок данных. Проверь формат.")
             return
 
-        codes = set(re.findall(r'(?i)КОД:\s*(\d{4,10})', kimi_response))
-        
-        final_message = "📦 **Предполагаемые коды ТН ВЭД (ЕАЭС/Армения):**\n\n"
-        final_message += kimi_response + "\n\n"
-        
-        if codes:
-            final_message += "🔍 **Проверить коды в базе (Alta.ru):**\n"
-            for code in codes:
-                final_message += f"👉 [Проверить код {code}](https://www.alta.ru/tnved/code/{code}/)\n"
+        success, info = await send_to_airtable(parsed_data)
+        if success:
+            client_info = f" (Клиент: {info})" if info else ""
+            await msg.edit_text(f"✅ Заказ **{parsed_data.get('Invoice_ID', 'N/A')}** успешно добавлен в Airtable{client_info}!\n\nВсе налоги и прибыль рассчитаются автоматически.", parse_mode="Markdown")
         else:
-            final_message += "⚠️ *Не удалось извлечь точные коды для создания ссылок. Проверь базу вручную.*"
+            await msg.edit_text(f"❌ Ошибка записи в Airtable: {info}")
+        return
 
-        await msg.edit_text(final_message, parse_mode='Markdown', disable_web_page_preview=True)
-
-    except Exception as e:
-        logger.error(f"HS error: {e}")
-        await update.message.reply_text(f'❌ Ошибка: {str(e)[:200]}')
+    # 2. Обычный чат
+    msg = await update.message.reply_text('⏳ Думаю...')
+    resp = await ask_kimi(text)
+    await msg.edit_text(resp[:4000])
 
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Главный обработчик всех фото. Распределяет логику."""
     try:
-        # 1. ПРОВЕРКА МАРШРУТИЗАЦИИ: если есть /hs в подписи - уходим в таможню
         caption = update.message.caption or ""
+        # Если это таможенный запрос
         if caption.lower().strip().startswith('/hs'):
-            return await process_hs(update, context)
+            msg = await update.message.reply_text('⏳ Подбираю коды ТН ВЭД (ЕАЭС)...')
+            photo = update.message.photo[-1]
+            file = await context.bot.get_file(photo.file_id)
+            buf = BytesIO()
+            await file.download_to_memory(buf)
+            image_b64 = base64.b64encode(buf.getvalue()).decode('utf-8')
+            
+            prompt = f"Подбери 2-3 наиболее вероятных 10-значных кода ТН ВЭД ЕАЭС для товара на фото. Описание: {caption.replace('/hs', '')}"
+            res = await ask_kimi(prompt, image_b64=image_b64, system_msg="Ты таможенный декларант ЕАЭС.")
+            
+            codes = set(re.findall(r'(?i)(\d{4,10})', res))
+            final_msg = f"📦 **Предполагаемые коды ТН ВЭД:**\n\n{res}\n\n🔍 **Проверить на Alta.ru:**\n"
+            for code in codes:
+                if len(code) >= 4:
+                    final_msg += f"👉 [Код {code}](https://www.alta.ru/tnved/code/{code}/)\n"
+            
+            await msg.edit_text(final_msg, parse_mode='Markdown', disable_web_page_preview=True)
+            return
 
-        # 2. Иначе - стандартная обработка имени файла
+        # Иначе - генерация имени файла
         msg = await update.message.reply_text('⏳ Обработка фото для создания имени файла...')
-        
         photo = update.message.photo[-1]
         file = await context.bot.get_file(photo.file_id)
-        
         buf = BytesIO()
         await file.download_to_memory(buf)
         image = Image.open(buf)
         
         barcode_num, text, article = await extract_image_data(image)
-        prompt = await get_naming_prompt(text, barcode_num, article)
-
+        prompt = f"Текст: {text[:2000]}\nШтрих-код: {barcode_num}\nАртикул: {article}\nТолько имя файла в формате 中文_English_Размер_Артикул_Штрихкод.pdf:"
         image_b64 = base64.b64encode(buf.getvalue()).decode('utf-8')
+        
         new_name = await ask_kimi(prompt, image_b64=image_b64, system_msg=SYSTEM_MSG_NAMING)
-        
-        # Перехват ошибок API (чтобы не создавать Error_429.pdf)
-        if new_name.startswith("Error"):
-            if "429" in new_name:
-                await msg.edit_text("❌ Ошибка 429: Лимит запросов к нейросети. Подожди пару минут.")
-            else:
-                await msg.edit_text(f"❌ Ошибка генерации имени: {new_name.replace('Error_', '')}")
-            return
-        
-        new_name = new_name.strip()
+        new_name = re.sub(r'[\\/*?:"\u003c\u003e|]', '', new_name.strip())
         if not new_name.endswith('.pdf'): new_name += '.pdf'
-        new_name = re.sub(r'[\\/*?:"\u003c\u003e|]', '', new_name)
         new_name = re.sub(r'_{2,}', '_', new_name)
         
-        if len(new_name) < 10:
-            new_name = f"Товар_Unknown_{barcode_num if barcode_num else '000'}.pdf"
+        if len(new_name) < 10: new_name = f"Товар_Unknown_{barcode_num if barcode_num else '000'}.pdf"
         
         response_lines = build_response_lines(new_name, barcode_num, article)
         await msg.edit_text('\n'.join(response_lines), parse_mode='Markdown', disable_web_page_preview=True)
@@ -290,116 +234,53 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f'❌ Ошибка: {str(e)[:200]}')
 
 async def handle_doc(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Обработка документов (PDF и фото документами)"""
+    """Обработка PDF документов"""
     try:
         doc = update.message.document
-        original_name = doc.file_name
-        
         if doc.file_size > 20 * 1024 * 1024:
-            await update.message.reply_text('❌ Файл слишком большой (>20MB)')
-            return
+            return await update.message.reply_text('❌ Файл слишком большой (>20MB)')
             
-        msg = await update.message.reply_text('⏳ Загрузка файла...')
+        msg = await update.message.reply_text('⏳ Обработка PDF...')
         file = await context.bot.get_file(doc.file_id)
         buf = BytesIO()
         await file.download_to_memory(buf)
         
-        if not original_name.lower().endswith('.pdf'):
-            try:
-                image = Image.open(buf)
-                await msg.edit_text('⏳ Обработка изображения из документа...')
-                barcode_num, text, article = await extract_image_data(image)
-                
-                prompt = await get_naming_prompt(text, barcode_num, article)
-                image_b64 = base64.b64encode(buf.getvalue()).decode('utf-8')
-                new_name = await ask_kimi(prompt, image_b64=image_b64, system_msg=SYSTEM_MSG_NAMING)
-                
-                # Перехват ошибок
-                if new_name.startswith("Error"):
-                    if "429" in new_name:
-                        await msg.edit_text("❌ Ошибка 429: Лимит запросов к нейросети.")
-                    else:
-                        await msg.edit_text(f"❌ Ошибка API: {new_name.replace('Error_', '')}")
-                    return
-
-                new_name = new_name.strip()
-                if not new_name.endswith('.pdf'): new_name += '.pdf'
-                new_name = re.sub(r'[\\/*?:"\u003c\u003e|]', '', new_name)
-                new_name = re.sub(r'_{2,}', '_', new_name)
-                
-                response_lines = build_response_lines(new_name, barcode_num, article)
-                await msg.edit_text('\n'.join(response_lines), parse_mode='Markdown', disable_web_page_preview=True)
-                return
-            except Exception:
-                await msg.edit_text('❌ Поддерживаются только .pdf или изображения')
-                return
-
-        await msg.edit_text('⏳ Обработка PDF (распознавание первой страницы)...')
-        
         buf.seek(0)
         images = convert_from_bytes(buf.read(), dpi=250, first_page=1, last_page=1)
-        if images:
-            img = images[0]
-            barcode_num, text, article = await extract_image_data(img)
-        else:
-            await msg.edit_text('❌ Не удалось открыть PDF')
-            return
-
-        prompt = await get_naming_prompt(text, barcode_num, article)
+        if not images:
+            return await msg.edit_text('❌ Не удалось открыть PDF')
+            
+        img = images[0]
+        barcode_num, text, article = await extract_image_data(img)
         
+        prompt = f"Текст: {text[:2000]}\nШтрих-код: {barcode_num}\nАртикул: {article}\nТолько имя файла в формате 中文_English_Размер_Артикул_Штрихкод.pdf:"
         new_name = await ask_kimi(prompt, system_msg=SYSTEM_MSG_NAMING)
         
-        # Перехват ошибок
-        if new_name.startswith("Error"):
-            if "429" in new_name:
-                await msg.edit_text("❌ Ошибка 429: Лимит запросов к нейросети. Подожди немного.")
-            else:
-                await msg.edit_text(f"❌ Ошибка API: {new_name.replace('Error_', '')}")
-            return
-
-        new_name = new_name.strip()
+        new_name = re.sub(r'[\\/*?:"\u003c\u003e|]', '', new_name.strip())
         if not new_name.endswith('.pdf'): new_name += '.pdf'
-        new_name = re.sub(r'[\\/*?:"\u003c\u003e|]', '', new_name)
         new_name = re.sub(r'_{2,}', '_', new_name)
         
-        if len(new_name) < 10:
-            new_name = f"Товар_Unknown_{barcode_num if barcode_num else '000'}.pdf"
+        if len(new_name) < 10: new_name = f"Товар_Unknown_{barcode_num if barcode_num else '000'}.pdf"
 
         await msg.delete()
-        
         response_lines = build_response_lines(new_name, barcode_num, article)
         await update.message.reply_text('\n'.join(response_lines), parse_mode='Markdown', disable_web_page_preview=True)
         
         buf.seek(0)
-        await update.message.reply_document(
-            document=InputFile(buf, filename=new_name),
-            caption=new_name
-        )
+        await update.message.reply_document(document=InputFile(buf, filename=new_name), caption=new_name)
         
     except Exception as e:
         logger.error(f"Doc error: {e}")
         await update.message.reply_text(f'❌ Ошибка: {str(e)[:200]}')
 
-async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Обработка простого текста"""
-    msg = await update.message.reply_text('⏳ Думаю...')
-    resp = await ask_kimi(update.message.text)
-    await msg.edit_text(resp[:4000])
-
 def main():
     app = Application.builder().token(TELEGRAM_TOKEN).build()
-    
-    app.add_handler(CommandHandler('start', start))
-    
-    # Перехватчик: если отправили /hs просто текстом, без картинки
-    app.add_handler(CommandHandler('hs', handle_hs_text_error)) 
-    
-    # Обработчик фото теперь ловит ВСЕ картинки и сам решает, куда их направить
+    app.add_handler(CommandHandler('start', lambda u, c: u.message.reply_text("🤖 Бот готов! Жду фото, PDF или отчет из GS Orders.")))
     app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
     app.add_handler(MessageHandler(filters.Document.ALL, handle_doc))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
     
-    logger.info("Бот запущен и готов к работе!")
+    logger.info("Бот запущен!")
     app.run_polling(drop_pending_updates=True)
 
 if __name__ == '__main__':
