@@ -92,31 +92,35 @@ def parse_airtable_export(text: str) -> dict:
                 key, val = line.split(':', 1)
                 parsed[key.strip()] = val.strip()
 
-    # 2. Вытаскиваем товары
-    invoice_body = text.split('AIRTABLE_EXPORT_START')[0]
+    # 2. Вытаскиваем товары (всё, что было НАД техническим блоком)
+    invoice_body = text.split('AIRTABLE_EXPORT_START')[0].strip()
     
     compact_items = []
-    # Вариант 1: Ищем старый длинный формат и сжимаем его
-    pattern_old = r'•\s*(.*?)\s*[—\-].*?\n\s*([\d\.]+)\s*[×xX]\s*([\d\.]+)\s*(?:\+\s*([\d\.]+))?\s*=\s*([\d\.]+)[¥Y]?'
-    matches_old = re.findall(pattern_old, invoice_body)
+    lines = invoice_body.split('\n')
     
-    if matches_old:
-        for match_item in matches_old:
-            name, qty, price, log, total = match_item
-            log_str = f"+{log}" if log else ""
-            compact_items.append(f"• {name.strip()}: {qty}x{price}{log_str} = {total} ¥")
-    else:
-        # Вариант 2: Формат уже новый компактный (одна строка)
-        for line in invoice_body.split('\n'):
-            line = line.strip()
-            if line.startswith('•') and '=' in line:
-                compact_items.append(line)
-    
-    # Собираем их в единый список для поля "Заказ"
+    for i, line in enumerate(lines):
+        line = line.strip()
+        # Ищем строки, начинающиеся с буллита
+        if line.startswith('•') or line.startswith('-'):
+            if '=' in line:
+                # Это новый компактный формат
+                compact_items.append(line.replace('¥', '').strip() + ' ¥')
+            else:
+                # Это старый длинный формат (сжимаем его)
+                name_part = line.lstrip('•-').strip()
+                name = re.sub(r'\s*[—\-].*$', '', name_part) # Убираем " — 10 шт"
+                
+                if i + 1 < len(lines):
+                    next_line = lines[i+1].strip()
+                    if '=' in next_line and any(c.isdigit() for c in next_line):
+                        math_str = next_line.replace('×', 'x').replace('¥', '').replace('Y', '').replace(' ', '')
+                        compact_items.append(f"• {name}: {math_str} ¥")
+
+    # Сохраняем результат
     if compact_items:
         parsed["Invoice_Body"] = "\n".join(compact_items)
     else:
-        # Резервный вариант: чистим текст от мусора
+        # Резервная чистка, если регулярки ничего не нашли
         clean_text = re.sub(r'COMMERCIAL INVOICE:[^\n]*\n?', '', invoice_body, flags=re.IGNORECASE)
         clean_text = re.sub(r'📅?\s*Date:[^\n]*\n?', '', clean_text, flags=re.IGNORECASE)
         clean_text = re.sub(r'[✅📅💰💼⚠️📦📊💾📑]', '', clean_text)
@@ -176,7 +180,14 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         success, info = await send_to_airtable(parsed_data)
         if success:
             client_info = f" (Клиент: {info})" if info else ""
-            await msg.edit_text(f"✅ Заказ **{parsed_data.get('Invoice_ID', 'N/A')}** успешно добавлен в Airtable{client_info}!\n\nТекст заказа загружен в новом компактном формате.", parse_mode="Markdown")
+            
+            # Умное предупреждение, если забыл скопировать товары
+            if parsed_data.get("Invoice_Body"):
+                status_text = "📝 Текст заказа успешно загружен!"
+            else:
+                status_text = "⚠️ ВНИМАНИЕ: Поле 'Заказ' пустое! Ты прислал только технический блок без списка товаров над ним."
+            
+            await msg.edit_text(f"✅ Заказ **{parsed_data.get('Invoice_ID', 'N/A')}** успешно добавлен в Airtable{client_info}!\n\n{status_text}", parse_mode="Markdown")
         else:
             await msg.edit_text(f"❌ Ошибка записи в Airtable: {info}")
         return
