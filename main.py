@@ -132,7 +132,7 @@ async def send_to_airtable(parsed_data: dict):
             client_name = f"{match.group(1).capitalize()}-{match.group(2)}"
 
         # Формируем запись строго по твоим колонкам
-     record = {
+        record = {
             "Код Карго": invoice,
             "Дата": formatted_date,
             "Сумма (¥)": float(parsed_data.get("Sum_Client_CNY", 0)),
@@ -140,7 +140,7 @@ async def send_to_airtable(parsed_data: dict):
             "Курс Клиент": float(parsed_data.get("Client_Rate", 0)),
             "Курс Реал": float(parsed_data.get("Real_Rate", 0)),
             "Расход материалов (¥)": float(parsed_data.get("China_Logistics_CNY", 0)),
-            "Кол-во коробок": int(parsed_data.get("FF_Boxes_Qty", 0)), # <--- ИСПОЛЬЗУЕМ ЭТО ПОЛЕ
+            "Кол-во коробок": int(parsed_data.get("FF_Boxes_Qty", 0)),
             "Заказ": f"Количество товаров: {parsed_data.get('Total_Qty', 0)} шт.",
             "Карго Статус": "Заказано"
         }
