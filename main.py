@@ -36,11 +36,6 @@ def is_valid_ean13(barcode: str) -> bool:
     checksum = digits.pop()
     return checksum == (10 - ((sum(digits[1::2]) * 3 + sum(digits[0::2])) % 10)) % 10
 
-def clean_response(text: str) -> str:
-    text = re.sub(r'(`|\*+)', '', text)
-    lines = [l.strip() for l in text.split('\n') if l.strip()]
-    return ' '.join(lines)
-
 async def ask_kimi(prompt: str, image_b64: str = None, system_msg: str = None) -> str:
     headers = {'Authorization': f'Bearer {KIMI_API_KEY}', 'Content-Type': 'application/json'}
     model = 'moonshot-v1-8k-vision-preview' if image_b64 else 'moonshot-v1-8k'
@@ -141,14 +136,13 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         caption = update.message.caption or ""
-        # 1. 1688 PARSER (БЕЗ ЭМОДЗИ, КАТЕГОРИЯ ПЕРВОЙ)
+        # 1. 1688 SUPPLIER CARD
         if caption.lower().strip().startswith('/1688'):
             product_category = caption.replace('/1688', '').strip()
-            msg = await update.message.reply_text('⏳ Формирую данные поставщика...')
+            msg = await update.message.reply_text('⏳ Извлекаю данные...')
             file = await context.bot.get_file(update.message.photo[-1].file_id)
             buf = BytesIO()
             await file.download_to_memory(buf)
-            
             prompt = (
                 f"Это данные для товара: {product_category if product_category else 'Unknown'}\n\n"
                 "Выведи данные строго в таком формате БЕЗ эмодзи. Используй моноширинный шрифт (code block) для значений:\n\n"
@@ -163,18 +157,35 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
             res = await ask_kimi(prompt, image_b64=base64.b64encode(buf.getvalue()).decode('utf-8'), system_msg="Ты эксперт 1688.")
             return await msg.edit_text(res, parse_mode='Markdown')
 
-        # 2. HS CODE / ТН ВЭД
+        # 2. HS CODE / ТН ВЭД (УЛУЧШЕННЫЙ ДЛЯ ALTA.RU)
         if caption.lower().strip().startswith('/hs'):
             msg = await update.message.reply_text('⏳ Подбираю коды ТН ВЭД...')
             file = await context.bot.get_file(update.message.photo[-1].file_id)
             buf = BytesIO()
             await file.download_to_memory(buf)
-            system_broker = "Ты таможенный брокер ЕАЭС. Используй только 10-значные коды. Не выдумывай их."
-            user_prompt = f"Подбери 3 точных кода ТН ВЭД. Описание: {caption.replace('/hs', '')}\nФормат: КОД: [10 цифр]\nОПИСАНИЕ: [Почему подходит]\n"
+            
+            system_broker = (
+                "Ты таможенный брокер ЕАЭС. Твоя задача — давать коды, которые точно существуют в справочнике.\n"
+                "ПРАВИЛО: Выдавай коды длиной 4, 6 или 10 знаков. Если ты не уверен на 100% в 10-значном коде, "
+                "лучше дай 6-значный (субпозиция), чтобы ссылка на Alta.ru точно сработала."
+            )
+            
+            user_prompt = (
+                f"Подбери 3 кода ТН ВЭД для товара. Описание: {caption.replace('/hs', '')}\n"
+                "Если на фото скриншот витрины — прочитай состав на китайском!\n"
+                "Давай только реально существующие в ЕАЭС коды. Формат: КОД: [цифры]\nОПИСАНИЕ: [Почему подходит]\n"
+            )
+            
             res = await ask_kimi(user_prompt, image_b64=base64.b64encode(buf.getvalue()).decode('utf-8'), system_msg=system_broker)
-            codes = set(re.findall(r'\b\d{10}\b', res))
-            final_msg = f"📦 **Предполагаемые коды:**\n\n{res}\n\n🔍 **Alta.ru:**\n"
-            for code in codes: final_msg += f"👉 [Код {code}](https://www.alta.ru/tnved/code/{code}/)\n"
+            # Ищем любые цифровые коды от 4 до 10 знаков
+            codes = re.findall(r'\b\d{4,10}\b', res)
+            
+            final_msg = f"📦 **Результаты подбора:**\n\n{res}\n\n🔍 **Проверить в базе:**\n"
+            added_codes = set()
+            for code in codes:
+                if code not in added_codes:
+                    final_msg += f"👉 [Код {code}](https://www.alta.ru/tnved/code/{code}/)\n"
+                    added_codes.add(code)
             return await msg.edit_text(final_msg, parse_mode='Markdown', disable_web_page_preview=True)
 
         # 3. LABEL NAMING
