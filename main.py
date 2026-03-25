@@ -100,30 +100,30 @@ def build_response_lines(new_name, barcode_num, article):
 # --- ИНТЕГРАЦИЯ С AIRTABLE ---
 
 def parse_airtable_export(text: str) -> dict:
-    """Извлекает данные и очищает текстовое описание заказа"""
-    # 1. Парсим технический блок
-    match = re.search(r'AIRTABLE_EXPORT_START(.*?)AIRTABLE_EXPORT_END', text, re.DOTALL)
+    """Извлекает данные и ИДЕАЛЬНО сохраняет структуру чека"""
     parsed = {}
+    
+    # 1. Достаем технические данные из нижнего блока
+    match = re.search(r'AIRTABLE_EXPORT_START(.*?)AIRTABLE_EXPORT_END', text, re.DOTALL)
     if match:
         for line in match.group(1).strip().split('\n'):
             if ':' in line:
                 key, val = line.split(':', 1)
                 parsed[key.strip()] = val.strip()
 
-    # 2. Вырезаем технический блок из сообщения, оставляя только текст чека
-    invoice_body = re.sub(r'AIRTABLE_EXPORT_START.*?AIRTABLE_EXPORT_END', '', text, flags=re.DOTALL)
+    # 2. Берем всё, что было ДО технического блока (сам красивый чек)
+    # Это гарантирует, что структура, абзацы и пробелы останутся нетронутыми!
+    invoice_body = text.split('AIRTABLE_EXPORT_START')[0]
 
-    # 3. Чистим текст: удаляем шапку, дату и эмодзи
+    # 3. Аккуратно удаляем шапку
     invoice_body = re.sub(r'COMMERCIAL INVOICE:[^\n]*\n?', '', invoice_body, flags=re.IGNORECASE)
     invoice_body = re.sub(r'📅?\s*Date:[^\n]*\n?', '', invoice_body, flags=re.IGNORECASE)
     
-    # Удаляем популярные эмодзи и меняем красивую точку на обычное тире
+    # 4. Удаляем эмодзи, оставляя чистый текст
     invoice_body = re.sub(r'[✅📅💰💼⚠️📦📊💾📑]', '', invoice_body)
-    invoice_body = invoice_body.replace('•', '-')
-
-    # Сохраняем чистый текст инвойса в наш словарь
-    parsed["Invoice_Body"] = invoice_body.strip()
     
+    # Сохраняем идеальный текст в словарь
+    parsed["Invoice_Body"] = invoice_body.strip()
     return parsed
 
 async def send_to_airtable(parsed_data: dict):
@@ -132,21 +132,18 @@ async def send_to_airtable(parsed_data: dict):
         api = Api(AIRTABLE_TOKEN)
         table = api.table(AIRTABLE_BASE_ID, AIRTABLE_TABLE_NAME)
         
-        # Конвертация даты DD.MM.YYYY -> YYYY-MM-DD для Airtable
         raw_date = parsed_data.get("Date", "")
         formatted_date = datetime.now().strftime("%Y-%m-%d")
         if "." in raw_date:
             d, m, y = raw_date.split(".")
             formatted_date = f"{y}-{m}-{d}"
 
-        # Нормализация имени клиента из Инвойса
         invoice = parsed_data.get("Invoice_ID", "")
         client_name = ""
         match = re.match(r'^([a-zA-Z]+)-?(\d+)', invoice)
         if match:
             client_name = f"{match.group(1).capitalize()}-{match.group(2)}"
 
-        # Формируем запись
         record = {
             "Код Карго": invoice,
             "Дата": formatted_date,
@@ -156,7 +153,7 @@ async def send_to_airtable(parsed_data: dict):
             "Курс Реал": float(parsed_data.get("Real_Rate", 0)),
             "Расход материалов (¥)": float(parsed_data.get("China_Logistics_CNY", 0)),
             "Кол-во коробок": int(parsed_data.get("FF_Boxes_Qty", 0)),
-            "Заказ": parsed_data.get("Invoice_Body", ""), # <--- ВОТ ЗДЕСЬ ЗАЛИВАЕТСЯ ТЕКСТ ИНВОЙСА
+            "Заказ": parsed_data.get("Invoice_Body", ""), # <--- ЗДЕСЬ ИДЕАЛЬНЫЙ ТЕКСТ ВСТАВЛЯЕТСЯ В AIRTABLE
             "Карго Статус": "Заказано"
         }
         
@@ -168,6 +165,31 @@ async def send_to_airtable(parsed_data: dict):
     except Exception as e:
         logger.error(f"Airtable Error: {e}")
         return False, str(e)
+
+async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = update.message.text
+    
+    # 1. Ловим экспорт в Airtable
+    if "AIRTABLE_EXPORT_START" in text:
+        msg = await update.message.reply_text("📥 Вижу отчёт GS Orders. Записываю в базу...")
+        parsed_data = parse_airtable_export(text)
+        
+        if not parsed_data:
+            await msg.edit_text("❌ Ошибка: не удалось прочитать блок данных. Проверь формат.")
+            return
+
+        success, info = await send_to_airtable(parsed_data)
+        if success:
+            client_info = f" (Клиент: {info})" if info else ""
+            await msg.edit_text(f"✅ Заказ **{parsed_data.get('Invoice_ID', 'N/A')}** успешно добавлен в Airtable{client_info}!\n\nТекст заказа загружен с сохранением структуры.", parse_mode="Markdown")
+        else:
+            await msg.edit_text(f"❌ Ошибка записи в Airtable: {info}")
+        return
+
+    # 2. Обычный чат
+    msg = await update.message.reply_text('⏳ Думаю...')
+    resp = await ask_kimi(text)
+    await msg.edit_text(resp[:4000])
 
 # --- ОБРАБОТЧИКИ ТЕЛЕГРАМ ---
 
