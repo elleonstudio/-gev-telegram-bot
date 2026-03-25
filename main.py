@@ -52,7 +52,7 @@ async def ask_kimi(prompt: str, image_b64: str = None, system_msg: str = None) -
         async with session.post('https://api.moonshot.cn/v1/chat/completions', headers=headers, json={'model': model, 'messages': messages, 'temperature': 0.05}) as resp:
             if resp.status == 200:
                 res = await resp.json()
-                return res['choices'][0]['message']['content'] # Без чистки Markdown для красоты
+                return res['choices'][0]['message']['content']
             return f"Error_{resp.status}"
 
 async def extract_image_data(image: Image.Image):
@@ -141,24 +141,27 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         caption = update.message.caption or ""
-        # 1. 1688 PARSER (КРАСИВЫЙ ФОРМАТ)
+        # 1. 1688 PARSER (БЕЗ ЭМОДЗИ, КАТЕГОРИЯ ПЕРВОЙ)
         if caption.lower().strip().startswith('/1688'):
-            msg = await update.message.reply_text('⏳ Создаю карточку поставщика...')
+            product_category = caption.replace('/1688', '').strip()
+            msg = await update.message.reply_text('⏳ Формирую данные поставщика...')
             file = await context.bot.get_file(update.message.photo[-1].file_id)
             buf = BytesIO()
             await file.download_to_memory(buf)
             
             prompt = (
-                "Извлеки данные поставщика. Оформи строго в таком виде, используя моноширинный шрифт (code block) для значений:\n\n"
-                "🏢 **Company (CN):**\n`Китайское название`\n\n"
-                "🏢 **Company (EN):**\n`Английское название`\n\n"
-                "📋 **Tax ID:**\n`Номер`\n\n"
-                "📍 **Address (CN):**\n`Адрес кит`\n\n"
-                "📍 **Address (EN):**\n`Адрес англ`\n\n"
-                "📞 **Phone:**\n`Телефон`"
+                f"Это данные для товара: {product_category if product_category else 'Unknown'}\n\n"
+                "Выведи данные строго в таком формате БЕЗ эмодзи. Используй моноширинный шрифт (code block) для значений:\n\n"
+                f"{product_category if product_category else ''}\n\n"
+                "Company (CN):\n`Китайское название`\n\n"
+                "Company (EN):\n`Английское название`\n\n"
+                "Tax ID:\n`Номер`\n\n"
+                "Address (CN):\n`Адрес кит`\n\n"
+                "Address (EN):\n`Адрес англ`\n\n"
+                "Phone:\n`Телефон`"
             )
             res = await ask_kimi(prompt, image_b64=base64.b64encode(buf.getvalue()).decode('utf-8'), system_msg="Ты эксперт 1688.")
-            return await msg.edit_text(f"📝 **SUPPLIER CARD (1688)**\n\n{res}", parse_mode='Markdown')
+            return await msg.edit_text(res, parse_mode='Markdown')
 
         # 2. HS CODE / ТН ВЭД
         if caption.lower().strip().startswith('/hs'):
