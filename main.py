@@ -36,6 +36,19 @@ async def ask_kimi(prompt: str, image_b64: str = None, system_msg: str = None) -
                 return res['choices'][0]['message']['content']
             return f"Error_{resp.status}"
 
+async def extract_image_data(image: Image.Image):
+    barcode_num, text, article = "", "", ""
+    try:
+        codes = decode(image.convert('L'))
+        if codes: barcode_num = codes[0].data.decode('utf-8')
+    except: pass
+    try: text = pytesseract.image_to_string(image, lang='rus+eng+chi_sim', config=r'--oem 3 --psm 6')
+    except: pass
+    for pattern in [r'Артикул[:\s]+(\d+)', r'Артикул[:\s]*(\d+)', r'Article[:\s]+(\d+)']:
+        match = re.search(pattern, text, re.IGNORECASE)
+        if match: article = match.group(1); break
+    return barcode_num, text, article
+
 def parse_airtable_export(text: str) -> dict:
     parsed = {}
     match = re.search(r'AIRTABLE_EXPORT_START(.*?)AIRTABLE_EXPORT_END', text, re.DOTALL)
@@ -80,32 +93,32 @@ async def send_to_airtable(parsed_data: dict):
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text
 
-    # КОМАНДА /paste - ЖЕСТКИЙ ПЕРЕНОС В ШАБЛОН
+    # КОМАНДА /paste - ТЕПЕРЬ ПОНИМАЕТ ТВОЙ ФОРМАТ РАСЧЕТА
     if text.startswith('/paste'):
         raw_input = text.replace('/paste', '').strip()
-        msg = await update.message.reply_text("⏳ Подготавливаю текст...")
+        msg = await update.message.reply_text("⏳ Формирую шаблон для GS Orders...")
         
         system_paste = (
-            "Твоя задача — ПЕРЕПЕЧАТАТЬ данные в шаблон. ТЕБЕ ЗАПРЕЩЕНО СЧИТАТЬ. "
-            "Если видишь '7.5x200+144', пиши '7.5x200+144'. Не пиши результат!\n\n"
-            "ШАБЛОН:\n/calc\n\nКлиент: [Имя]\n\nТовар [N]:\nНазвание: [Имя товара]\nКоличество: [Число]\nЦена клиенту: [Текст расчета]\nЗакупка: -\nДоставка: [Текст доставки]\nРазмеры: - - - -\n\nКурс клиенту: [Курс1]\nМой курс: [Курс2]"
+            "Ты — робот-конвертер. Твоя задача — извлечь данные из математического примера пользователя и вставить их в шаблон.\n"
+            "ПРИМЕР ВВОДА:\n7.5x200+144=1644 vase\n"
+            "ТЫ ДОЛЖЕН ПОНЯТЬ: 7.5 — это цена, 200 — количество, 144 — доставка, vase — название.\n"
+            "ЗАПРЕЩЕНО: пересчитывать значения. Просто копируй числа.\n"
+            "Закупка всегда '-'. Размеры всегда '- - - -'. Ответ всегда начинается с /calc"
         )
         
-        prompt_paste = f"Заполни шаблон этими данными (начни с /calc): {raw_input}"
+        prompt_paste = f"Переложи эти данные в шаблон /calc:\n{raw_input}"
         res = await ask_kimi(prompt_paste, system_msg=system_paste)
         return await msg.edit_text(res.strip())
 
     if "AIRTABLE_EXPORT_START" in text:
-        msg = await update.message.reply_text("📥 В базу...")
+        msg = await update.message.reply_text("📥...")
         parsed_data = parse_airtable_export(text)
         success, info = await send_to_airtable(parsed_data)
         if success: await msg.edit_text(f"✅ Добавлено!")
         else: await msg.edit_text(f"❌ Ошибка.")
         return
 
-    # Игнорируем сообщения, которые уже являются готовыми расчетами
-    if text.strip().startswith('/calc') or "COMMERCIAL INVOICE" in text:
-        return 
+    if text.strip().startswith('/calc'): return 
 
     msg = await update.message.reply_text('⏳...')
     resp = await ask_kimi(text, system_msg="Ты ИИ-ассистент.")
@@ -118,7 +131,7 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
             msg = await update.message.reply_text('⏳...')
             file = await context.bot.get_file(update.message.photo[-1].file_id)
             buf = BytesIO(); await file.download_to_memory(buf)
-            res = await ask_kimi("Company CN/EN, Tax ID, Address CN/EN. Code blocks.", image_b64=base64.b64encode(buf.getvalue()).decode('utf-8'), system_msg="1688 Expert.")
+            res = await ask_kimi("Supplier Info CN/EN. Code blocks.", image_b64=base64.b64encode(buf.getvalue()).decode('utf-8'), system_msg="1688 Expert.")
             return await msg.edit_text(res, parse_mode='Markdown')
 
         if caption.lower().strip().startswith('/hs'):
@@ -135,7 +148,7 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         file = await context.bot.get_file(update.message.photo[-1].file_id)
         buf = BytesIO(); await file.download_to_memory(buf)
         barcode_num, text, article = await extract_image_data(Image.open(buf))
-        new_name = await ask_kimi(f"Name for file. Text: {text}", image_b64=base64.b64encode(buf.getvalue()).decode('utf-8'), system_msg="Naming expert.")
+        new_name = await ask_kimi(f"File naming. Text: {text}", image_b64=base64.b64encode(buf.getvalue()).decode('utf-8'), system_msg="Naming Expert.")
         new_name = re.sub(r'[\\/*?:"<>|]', '', new_name.strip()) + ".pdf"
         await msg.edit_text(f"📄 `{new_name}`\nBarcode: {barcode_num}")
     except Exception: pass
@@ -147,14 +160,14 @@ async def handle_doc(update: Update, context: ContextTypes.DEFAULT_TYPE):
         buf = BytesIO(); await (await context.bot.get_file(doc.file_id)).download_to_memory(buf)
         buf.seek(0); images = convert_from_bytes(buf.read(), dpi=200, first_page=1, last_page=1)
         barcode_num, text, article = await extract_image_data(images[0])
-        new_name = await ask_kimi(f"Naming for: {text}", system_msg="Naming Expert.")
+        new_name = await ask_kimi(f"Naming: {text}", system_msg="Naming Expert.")
         new_name = re.sub(r'[\\/*?:"<>|]', '', new_name.strip()) + ".pdf"
         await msg.delete(); await update.message.reply_document(document=InputFile(buf, filename=new_name), caption=new_name)
     except Exception: pass
 
 def main():
     app = Application.builder().token(TELEGRAM_TOKEN).build()
-    app.add_handler(CommandHandler('start', lambda u, c: u.message.reply_text("🤖 Ready.")))
+    app.add_handler(CommandHandler('start', lambda u, c: u.message.reply_text("🤖 Online.")))
     app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
     app.add_handler(MessageHandler(filters.Document.ALL, handle_doc))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
