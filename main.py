@@ -25,16 +25,7 @@ AIRTABLE_TOKEN = "pati6TFqzPlZaI08o.88a1e98775f215fb08b58c2fde28b38acebc5f4556c8
 AIRTABLE_BASE_ID = "appRIlSL63Kxh6iWX"
 AIRTABLE_TABLE_NAME = "Закупка"
 
-SYSTEM_MSG_NAMING = (
-    "Ты ассистент по созданию имен файлов. Формат: 中文_English_Размер_Артикул_Штрихкод.pdf\n"
-    "Перевод на китайский и английский ОБЯЗАТЕЛЕН."
-)
-
-def is_valid_ean13(barcode: str) -> bool:
-    if not barcode or len(barcode) != 13 or not barcode.isdigit(): return False
-    digits = [int(x) for x in barcode]
-    checksum = digits.pop()
-    return checksum == (10 - ((sum(digits[1::2]) * 3 + sum(digits[0::2])) % 10)) % 10
+SYSTEM_MSG_NAMING = "Ты ассистент по именам файлов. Формат: 中文_English_Размер_Артикул_Штрихкод.pdf"
 
 async def ask_kimi(prompt: str, image_b64: str = None, system_msg: str = None) -> str:
     headers = {'Authorization': f'Bearer {KIMI_API_KEY}', 'Content-Type': 'application/json'}
@@ -42,7 +33,6 @@ async def ask_kimi(prompt: str, image_b64: str = None, system_msg: str = None) -
     content = [{'type': 'text', 'text': prompt}]
     if image_b64: content.append({'type': 'image_url', 'image_url': {'url': f'data:image/jpeg;base64,{image_b64}'}})
     messages = [{'role': 'system', 'content': system_msg or 'Ты ИИ-ассистент.'}, {'role': 'user', 'content': content}]
-    
     async with aiohttp.ClientSession() as session:
         async with session.post('https://api.moonshot.cn/v1/chat/completions', headers=headers, json={'model': model, 'messages': messages, 'temperature': 0.05}) as resp:
             if resp.status == 200:
@@ -56,24 +46,17 @@ async def extract_image_data(image: Image.Image):
         codes = decode(image.convert('L'))
         if codes: barcode_num = codes[0].data.decode('utf-8')
     except: pass
-    try:
-        text = pytesseract.image_to_string(image, lang='rus+eng+chi_sim', config=r'--oem 3 --psm 6')
+    try: text = pytesseract.image_to_string(image, lang='rus+eng+chi_sim', config=r'--oem 3 --psm 6')
     except: pass
     for pattern in [r'Артикул[:\s]+(\d+)', r'Артикул[:\s]*(\d+)', r'Article[:\s]+(\d+)']:
         match = re.search(pattern, text, re.IGNORECASE)
-        if match:
-            article = match.group(1)
-            break
+        if match: article = match.group(1); break
     return barcode_num, text, article
 
 def build_response_lines(new_name, barcode_num, article):
     response_lines = [f"📄 `{new_name}`"]
-    if barcode_num:
-        response_lines.insert(0, f"✅ Штрих-код: {barcode_num}" + (" (Читается + EAN-13 верен)" if is_valid_ean13(barcode_num) else " (ОШИБКА ФОРМАТА!)"))
-    else:
-        response_lines.insert(0, "❌ Штрих-код: НЕ НАЙДЕН НА ИЗОБРАЖЕНИИ")
-    if article:
-        response_lines.insert(1, f"✅ Артикул: {article} 👉 [На WB](https://www.wildberries.ru/catalog/{article}/detail.aspx)")
+    if barcode_num: response_lines.insert(0, f"✅ Штрих-код: {barcode_num}")
+    if article: response_lines.insert(1, f"✅ Артикул: {article}")
     return response_lines
 
 def parse_airtable_export(text: str) -> dict:
@@ -115,12 +98,29 @@ async def send_to_airtable(parsed_data: dict):
         if client_name: record["Клиент"] = client_name 
         table.create(record, typecast=True)
         return True, client_name
-    except Exception as e:
-        logger.error(f"Airtable Error: {e}")
-        return False, str(e)
+    except Exception as e: return False, str(e)
 
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text
+
+    # КОМАНДА /paste ДЛЯ GS ORDERS
+    if text.startswith('/paste'):
+        raw_input = text.replace('/paste', '').strip()
+        msg = await update.message.reply_text("🏗 Формирую шаблон для GS Orders...")
+        
+        system_paste = (
+            "Ты помощник для формирования заказов. Твоя задача — расставить данные пользователя строго по шаблону GS Orders.\n"
+            "Шаблон:\nКлиент: [Имя/ID]\n\nТовар [N]:\nНазвание: [Name]\nКоличество: [Qty]\nЦена клиенту: [Price]\nЗакупка: [Buy]\nДоставка: [Logistics]\nРазмеры: - - - -\n\nВ конце: Курс клиенту: [X]\nМой курс: [Y]"
+        )
+        
+        prompt_paste = (
+            f"Преврати это в шаблон GS Orders:\n{raw_input}\n\n"
+            "Важно: Названия товаров пиши на русском. Если цена/доставка не указаны, ставь '-'. Размеры всегда '- - - -'."
+        )
+        
+        res = await ask_kimi(prompt_paste, system_msg=system_paste)
+        return await msg.edit_text(res)
+
     if "AIRTABLE_EXPORT_START" in text:
         msg = await update.message.reply_text("📥 Записываю в Airtable...")
         parsed_data = parse_airtable_export(text)
@@ -128,7 +128,9 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if success: await msg.edit_text(f"✅ Заказ **{parsed_data.get('Invoice_ID', 'N/A')}** добавлен!")
         else: await msg.edit_text(f"❌ Ошибка: {info}")
         return
-    if "COMMERCIAL INVOICE" in text or "ТОВАРНАЯ ВЕДОМОСТЬ" in text: return 
+
+    if "COMMERCIAL INVOICE" in text or "КЛИЕНТ:" in text.upper(): return 
+
     msg = await update.message.reply_text('⏳ Думаю...')
     resp = await ask_kimi(text)
     await msg.edit_text(resp[:4000])
@@ -136,65 +138,34 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         caption = update.message.caption or ""
-        # 1. 1688 SUPPLIER CARD
+        # 1. 1688
         if caption.lower().strip().startswith('/1688'):
-            product_category = caption.replace('/1688', '').strip()
-            msg = await update.message.reply_text('⏳ Извлекаю данные...')
+            product_cat = caption.replace('/1688', '').strip()
+            msg = await update.message.reply_text('⏳ Данные поставщика...')
             file = await context.bot.get_file(update.message.photo[-1].file_id)
-            buf = BytesIO()
-            await file.download_to_memory(buf)
-            prompt = (
-                f"Это данные для товара: {product_category if product_category else 'Unknown'}\n\n"
-                "Выведи данные строго в таком формате БЕЗ эмодзи. Используй моноширинный шрифт (code block) для значений:\n\n"
-                f"{product_category if product_category else ''}\n\n"
-                "Company (CN):\n`Китайское название`\n\n"
-                "Company (EN):\n`Английское название`\n\n"
-                "Tax ID:\n`Номер`\n\n"
-                "Address (CN):\n`Адрес кит`\n\n"
-                "Address (EN):\n`Адрес англ`\n\n"
-                "Phone:\n`Телефон`"
-            )
-            res = await ask_kimi(prompt, image_b64=base64.b64encode(buf.getvalue()).decode('utf-8'), system_msg="Ты эксперт 1688.")
+            buf = BytesIO(); await file.download_to_memory(buf)
+            prompt = f"Данные для: {product_cat}\nCompany (CN/EN), Tax ID, Address (CN/EN), Phone. Без эмодзи. Код блоки для значений."
+            res = await ask_kimi(prompt, image_b64=base64.b64encode(buf.getvalue()).decode('utf-8'), system_msg="Эксперт 1688.")
             return await msg.edit_text(res, parse_mode='Markdown')
 
-        # 2. HS CODE / ТН ВЭД (УЛУЧШЕННЫЙ ДЛЯ ALTA.RU)
+        # 2. HS CODE
         if caption.lower().strip().startswith('/hs'):
-            msg = await update.message.reply_text('⏳ Подбираю коды ТН ВЭД...')
+            msg = await update.message.reply_text('⏳ Коды ТН ВЭД...')
             file = await context.bot.get_file(update.message.photo[-1].file_id)
-            buf = BytesIO()
-            await file.download_to_memory(buf)
-            
-            system_broker = (
-                "Ты таможенный брокер ЕАЭС. Твоя задача — давать коды, которые точно существуют в справочнике.\n"
-                "ПРАВИЛО: Выдавай коды длиной 4, 6 или 10 знаков. Если ты не уверен на 100% в 10-значном коде, "
-                "лучше дай 6-значный (субпозиция), чтобы ссылка на Alta.ru точно сработала."
-            )
-            
-            user_prompt = (
-                f"Подбери 3 кода ТН ВЭД для товара. Описание: {caption.replace('/hs', '')}\n"
-                "Если на фото скриншот витрины — прочитай состав на китайском!\n"
-                "Давай только реально существующие в ЕАЭС коды. Формат: КОД: [цифры]\nОПИСАНИЕ: [Почему подходит]\n"
-            )
-            
-            res = await ask_kimi(user_prompt, image_b64=base64.b64encode(buf.getvalue()).decode('utf-8'), system_msg=system_broker)
-            # Ищем любые цифровые коды от 4 до 10 знаков
+            buf = BytesIO(); await file.download_to_memory(buf)
+            prompt = f"Подбери 3 кода ТН ВЭД. Описание: {caption.replace('/hs', '')}. Если витрина - читай состав на китайском."
+            res = await ask_kimi(prompt, image_b64=base64.b64encode(buf.getvalue()).decode('utf-8'), system_msg="Брокер ЕАЭС.")
             codes = re.findall(r'\b\d{4,10}\b', res)
-            
-            final_msg = f"📦 **Результаты подбора:**\n\n{res}\n\n🔍 **Проверить в базе:**\n"
-            added_codes = set()
-            for code in codes:
-                if code not in added_codes:
-                    final_msg += f"👉 [Код {code}](https://www.alta.ru/tnved/code/{code}/)\n"
-                    added_codes.add(code)
+            final_msg = f"📦 **Результаты:**\n\n{res}\n\n🔍 **Alta.ru:**\n"
+            for code in set(codes): final_msg += f"👉 [Код {code}](https://www.alta.ru/tnved/code/{code}/)\n"
             return await msg.edit_text(final_msg, parse_mode='Markdown', disable_web_page_preview=True)
 
-        # 3. LABEL NAMING
-        msg = await update.message.reply_text('⏳ Обработка этикетки...')
+        # 3. LABEL
+        msg = await update.message.reply_text('⏳ Обработка...')
         file = await context.bot.get_file(update.message.photo[-1].file_id)
-        buf = BytesIO()
-        await file.download_to_memory(buf)
+        buf = BytesIO(); await file.download_to_memory(buf)
         barcode_num, text, article = await extract_image_data(Image.open(buf))
-        new_name = await ask_kimi(f"Текст: {text[:1000]}\nШтрихкод: {barcode_num}\nАртикул: {article}", image_b64=base64.b64encode(buf.getvalue()).decode('utf-8'), system_msg=SYSTEM_MSG_NAMING)
+        new_name = await ask_kimi(f"Текст: {text[:1000]}\nШтрихкод: {barcode_num}", image_b64=base64.b64encode(buf.getvalue()).decode('utf-8'), system_msg=SYSTEM_MSG_NAMING)
         new_name = re.sub(r'[\\/*?:"<>|]', '', new_name.strip()) + ".pdf"
         await msg.edit_text('\n'.join(build_response_lines(new_name, barcode_num, article)), parse_mode='Markdown', disable_web_page_preview=True)
     except Exception as e: await update.message.reply_text(f'❌ Ошибка: {str(e)[:100]}')
@@ -203,16 +174,13 @@ async def handle_doc(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         doc = update.message.document
         msg = await update.message.reply_text('⏳ PDF...')
-        buf = BytesIO()
-        await (await context.bot.get_file(doc.file_id)).download_to_memory(buf)
-        buf.seek(0)
-        images = convert_from_bytes(buf.read(), dpi=200, first_page=1, last_page=1)
+        buf = BytesIO(); await (await context.bot.get_file(doc.file_id)).download_to_memory(buf)
+        buf.seek(0); images = convert_from_bytes(buf.read(), dpi=200, first_page=1, last_page=1)
         barcode_num, text, article = await extract_image_data(images[0])
         new_name = await ask_kimi(f"Текст: {text[:1000]}", system_msg=SYSTEM_MSG_NAMING)
         new_name = re.sub(r'[\\/*?:"<>|]', '', new_name.strip()) + ".pdf"
-        await msg.delete()
-        await update.message.reply_document(document=InputFile(buf, filename=new_name), caption=new_name)
-    except Exception as e: await update.message.reply_text(f'❌ Ошибка: {str(e)[:100]}')
+        await msg.delete(); await update.message.reply_document(document=InputFile(buf, filename=new_name), caption=new_name)
+    except Exception: pass
 
 def main():
     app = Application.builder().token(TELEGRAM_TOKEN).build()
