@@ -52,7 +52,7 @@ async def ask_kimi(prompt: str, image_b64: str = None, system_msg: str = None) -
         async with session.post('https://api.moonshot.cn/v1/chat/completions', headers=headers, json={'model': model, 'messages': messages, 'temperature': 0.05}) as resp:
             if resp.status == 200:
                 res = await resp.json()
-                return clean_response(res['choices'][0]['message']['content'])
+                return res['choices'][0]['message']['content'] # Без чистки Markdown для красоты
             return f"Error_{resp.status}"
 
 async def extract_image_data(image: Image.Image):
@@ -141,34 +141,33 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         caption = update.message.caption or ""
-        # 1. 1688 PARSER
+        # 1. 1688 PARSER (КРАСИВЫЙ ФОРМАТ)
         if caption.lower().strip().startswith('/1688'):
-            msg = await update.message.reply_text('⏳ Парсинг поставщика...')
+            msg = await update.message.reply_text('⏳ Создаю карточку поставщика...')
             file = await context.bot.get_file(update.message.photo[-1].file_id)
             buf = BytesIO()
             await file.download_to_memory(buf)
-            prompt = "Извлеки данные поставщика (Название CN/EN, Tax ID, Адрес CN/EN, Телефон). Формат: строго списком."
+            
+            prompt = (
+                "Извлеки данные поставщика. Оформи строго в таком виде, используя моноширинный шрифт (code block) для значений:\n\n"
+                "🏢 **Company (CN):**\n`Китайское название`\n\n"
+                "🏢 **Company (EN):**\n`Английское название`\n\n"
+                "📋 **Tax ID:**\n`Номер`\n\n"
+                "📍 **Address (CN):**\n`Адрес кит`\n\n"
+                "📍 **Address (EN):**\n`Адрес англ`\n\n"
+                "📞 **Phone:**\n`Телефон`"
+            )
             res = await ask_kimi(prompt, image_b64=base64.b64encode(buf.getvalue()).decode('utf-8'), system_msg="Ты эксперт 1688.")
-            return await msg.edit_text(f"📝 **Данные 1688:**\n\n{res}")
+            return await msg.edit_text(f"📝 **SUPPLIER CARD (1688)**\n\n{res}", parse_mode='Markdown')
 
-        # 2. HS CODE / ТН ВЭД (ИСПРАВЛЕННЫЙ)
+        # 2. HS CODE / ТН ВЭД
         if caption.lower().strip().startswith('/hs'):
-            msg = await update.message.reply_text('⏳ Подбираю РЕАЛЬНЫЕ коды ТН ВЭД...')
+            msg = await update.message.reply_text('⏳ Подбираю коды ТН ВЭД...')
             file = await context.bot.get_file(update.message.photo[-1].file_id)
             buf = BytesIO()
             await file.download_to_memory(buf)
-            
-            system_broker = (
-                "Ты таможенный брокер ЕАЭС. Используй ТОЛЬКО реально существующие коды ТН ВЭД ЕАЭС (10 знаков). "
-                "Никогда не выдумывай окончания кодов. Если сомневаешься в материале, дай варианты для разных материалов (трикотаж 61 группа, текстиль 62 группа)."
-            )
-            
-            user_prompt = (
-                f"Подбери 3 наиболее точных кода ТН ВЭД ЕАЭС. Описание: {caption.replace('/hs', '').strip()}\n"
-                "Если на картинке витрина 1688 — прочитай состав на китайском!\n"
-                "Формат: КОД: [10 цифр]\nОПИСАНИЕ: [Почему подходит]\n"
-            )
-            
+            system_broker = "Ты таможенный брокер ЕАЭС. Используй только 10-значные коды. Не выдумывай их."
+            user_prompt = f"Подбери 3 точных кода ТН ВЭД. Описание: {caption.replace('/hs', '')}\nФормат: КОД: [10 цифр]\nОПИСАНИЕ: [Почему подходит]\n"
             res = await ask_kimi(user_prompt, image_b64=base64.b64encode(buf.getvalue()).decode('utf-8'), system_msg=system_broker)
             codes = set(re.findall(r'\b\d{10}\b', res))
             final_msg = f"📦 **Предполагаемые коды:**\n\n{res}\n\n🔍 **Alta.ru:**\n"
