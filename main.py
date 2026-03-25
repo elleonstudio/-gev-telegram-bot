@@ -35,31 +35,29 @@ async def handle_paste(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not raw_text: return
     
     data_to_process = raw_text.replace('/paste', '').strip()
-    if not data_to_process:
-        await update.message.reply_text("Отправь данные после команды /paste")
-        return
-
-    status_msg = await update.message.reply_text("🏗 Переупаковываю в шаблон GS Orders...")
     
     system_paste = (
-        "Ты — технический редактор заказов. Твоя задача: взять расчеты пользователя и расставить их СТРОГО по шаблону.\n"
-        "НЕ ИЗМЕНЯЙ ЦИФРЫ И НЕ СЧИТАЙ СУММЫ. Если написано 7.5x200+144, так и пиши в поле Цена или Доставка.\n\n"
-        "ФОРМАТ ОТВЕТА (СТРОГО):\n"
+        "Ты — технический конвертер. Разбери математическую строку пользователя на части.\n"
+        "ПРАВИЛО РАЗБОРА строки типа '7.5x200+144=1644 vase':\n"
+        "1. Первое число (7.5) -> в поле 'Цена клиенту'.\n"
+        "2. Второе число после x (200) -> в поле 'Количество'.\n"
+        "3. Число после знака + (144) -> в поле 'Доставка'.\n"
+        "4. Текст в конце (vase) -> в поле 'Название'.\n\n"
+        "ФОРМАТ ОТВЕТА:\n"
         "/calc\n\n"
-        "Клиент: [Имя клиента]\n\n"
-        "Товар 1:\nНазвание: [Name]\nКоличество: [Qty]\nЦена клиенту: [Price]\nЗакупка: -\nДоставка: [Logistics]\nРазмеры: - - - -\n\n"
-        "(повтори для всех товаров)\n\n"
-        "Курс клиенту: [Число из текста]\n"
-        "Мой курс: [Число из текста]"
+        "Клиент: [Имя из первой строки]\n\n"
+        "Товар [N]:\nНазвание: [Name]\nКоличество: [Qty]\nЦена клиенту: [Price]\nЗакупка: -\nДоставка: [Logistics]\nРазмеры: - - - -\n\n"
+        "Курс клиенту: [Курс 1]\n"
+        "Мой курс: [Курс 2]"
     )
     
-    prompt = f"Преврати этот текст в шаблон /calc, распределив данные по полям: {data_to_process}"
+    prompt = f"Разобщи данные по шаблону /calc:\n{data_to_process}"
     
     try:
         result = await ask_kimi(prompt, system_msg=system_paste)
-        await status_msg.edit_text(result.strip())
+        await update.message.reply_text(result.strip())
     except Exception as e:
-        await status_msg.edit_text(f"❌ Ошибка: {e}")
+        await update.message.reply_text(f"❌ Ошибка: {e}")
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text
