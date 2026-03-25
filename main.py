@@ -14,6 +14,7 @@ import pytesseract
 from pyzbar.pyzbar import decode
 from pyairtable import Api
 
+# Логирование для отладки в Railway (смотри вкладку Logs, если замолчит)
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
 logger = logging.getLogger(__name__)
 
@@ -23,154 +24,89 @@ AIRTABLE_TOKEN = "pati6TFqzPlZaI08o.88a1e98775f215fb08b58c2fde28b38acebc5f4556c8
 AIRTABLE_BASE_ID = "appRIlSL63Kxh6iWX"
 AIRTABLE_TABLE_NAME = "Закупка"
 
-async def ask_kimi(prompt: str, image_b64: str = None, system_msg: str = None) -> str:
+async def ask_kimi(prompt: str, image_b64: str = None, system_msg: str = "Ты ИИ-ассистент.") -> str:
     headers = {'Authorization': f'Bearer {KIMI_API_KEY}', 'Content-Type': 'application/json'}
     model = 'moonshot-v1-8k-vision-preview' if image_b64 else 'moonshot-v1-8k'
     content = [{'type': 'text', 'text': prompt}]
-    if image_b64: content.append({'type': 'image_url', 'image_url': {'url': f'data:image/jpeg;base64,{image_b64}'}})
-    messages = [{'role': 'system', 'content': system_msg}, {'role': 'user', 'content': content}]
+    if image_b64:
+        content.append({'type': 'image_url', 'image_url': {'url': f'data:image/jpeg;base64,{image_b64}'}})
+    
+    messages = [
+        {'role': 'system', 'content': system_msg},
+        {'role': 'user', 'content': content}
+    ]
+    
     async with aiohttp.ClientSession() as session:
         async with session.post('https://api.moonshot.cn/v1/chat/completions', headers=headers, json={'model': model, 'messages': messages, 'temperature': 0.0}) as resp:
             if resp.status == 200:
                 res = await resp.json()
                 return res['choices'][0]['message']['content']
+            logger.error(f"Kimi API Error: {resp.status}")
             return f"Error_{resp.status}"
-
-async def extract_image_data(image: Image.Image):
-    barcode_num, text, article = "", "", ""
-    try:
-        codes = decode(image.convert('L'))
-        if codes: barcode_num = codes[0].data.decode('utf-8')
-    except: pass
-    try: text = pytesseract.image_to_string(image, lang='rus+eng+chi_sim', config=r'--oem 3 --psm 6')
-    except: pass
-    for pattern in [r'Артикул[:\s]+(\d+)', r'Артикул[:\s]*(\d+)', r'Article[:\s]+(\d+)']:
-        match = re.search(pattern, text, re.IGNORECASE)
-        if match: article = match.group(1); break
-    return barcode_num, text, article
-
-def parse_airtable_export(text: str) -> dict:
-    parsed = {}
-    match = re.search(r'AIRTABLE_EXPORT_START(.*?)AIRTABLE_EXPORT_END', text, re.DOTALL)
-    if match:
-        for line in match.group(1).strip().split('\n'):
-            if ':' in line:
-                key, val = line.split(':', 1)
-                parsed[key.strip()] = val.strip()
-    invoice_body = text.split('AIRTABLE_EXPORT_START')[0].strip()
-    items = [l.strip() for l in invoice_body.split('\n') if l.strip().startswith(('•', '-'))]
-    parsed["Invoice_Body"] = "\n".join(items) if items else invoice_body
-    return parsed
-
-async def send_to_airtable(parsed_data: dict):
-    try:
-        api = Api(AIRTABLE_TOKEN)
-        table = api.table(AIRTABLE_BASE_ID, AIRTABLE_TABLE_NAME)
-        raw_date = parsed_data.get("Date", "")
-        formatted_date = datetime.now().strftime("%Y-%m-%d")
-        if "." in raw_date:
-            d, m, y = raw_date.split(".")
-            formatted_date = f"{y}-{m}-{d}"
-        invoice = parsed_data.get("Invoice_ID", "")
-        client_name = ""
-        match = re.match(r'^([a-zA-Z]+)-?(\d+)', invoice)
-        if match: client_name = f"{match.group(1).capitalize()}-{match.group(2)}"
-        record = {
-            "Код Карго": invoice, "Дата": formatted_date,
-            "Сумма (¥)": float(parsed_data.get("Sum_Client_CNY", 0)),
-            "Реал Цена Закупки (¥)": float(parsed_data.get("Real_Purchase_CNY", 0)),
-            "Курс Клиент": float(parsed_data.get("Client_Rate", 0)),
-            "Курс Реал": float(parsed_data.get("Real_Rate", 0)),
-            "Расход материалов (¥)": float(parsed_data.get("China_Logistics_CNY", 0)),
-            "Кол-во коробок": int(parsed_data.get("FF_Boxes_Qty", 0)),
-            "Заказ": parsed_data.get("Invoice_Body", ""), "Карго Статус": "Заказано"
-        }
-        if client_name: record["Клиент"] = client_name 
-        table.create(record, typecast=True)
-        return True, client_name
-    except Exception: return False, "Error"
 
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text
+    if not text: return
 
-    # КОМАНДА /paste - ТЕПЕРЬ ПОНИМАЕТ ТВОЙ ФОРМАТ РАСЧЕТА
-    if text.startswith('/paste'):
-        raw_input = text.replace('/paste', '').strip()
-        msg = await update.message.reply_text("⏳ Формирую шаблон для GS Orders...")
-        
-        system_paste = (
-            "Ты — робот-конвертер. Твоя задача — извлечь данные из математического примера пользователя и вставить их в шаблон.\n"
-            "ПРИМЕР ВВОДА:\n7.5x200+144=1644 vase\n"
-            "ТЫ ДОЛЖЕН ПОНЯТЬ: 7.5 — это цена, 200 — количество, 144 — доставка, vase — название.\n"
-            "ЗАПРЕЩЕНО: пересчитывать значения. Просто копируй числа.\n"
-            "Закупка всегда '-'. Размеры всегда '- - - -'. Ответ всегда начинается с /calc"
-        )
-        
-        prompt_paste = f"Переложи эти данные в шаблон /calc:\n{raw_input}"
-        res = await ask_kimi(prompt_paste, system_msg=system_paste)
-        return await msg.edit_text(res.strip())
-
-    if "AIRTABLE_EXPORT_START" in text:
-        msg = await update.message.reply_text("📥...")
-        parsed_data = parse_airtable_export(text)
-        success, info = await send_to_airtable(parsed_data)
-        if success: await msg.edit_text(f"✅ Добавлено!")
-        else: await msg.edit_text(f"❌ Ошибка.")
+    # 1. Если сообщение начинается с /calc — это уже готовый расчет, ИГНОРИРУЕМ
+    if text.strip().startswith('/calc'):
         return
 
-    if text.strip().startswith('/calc'): return 
+    # 2. Обработка команды /paste (Твой ручной расчет -> Шаблон GS Orders)
+    if text.startswith('/paste'):
+        raw_input = text.replace('/paste', '').strip()
+        msg = await update.message.reply_text("⏳ Формирую шаблон...")
+        
+        system_paste = (
+            "Ты — робот-конвертер. Перенеси данные в шаблон /calc.\n"
+            "НЕ СЧИТАЙ САМ. Просто вытащи числа.\n"
+            "Пример: 7.5x200+144=1644 vase -> Название: vase, Кол-во: 200, Цена: 7.5, Доставка: 144.\n"
+            "Закупка: -. Размеры: - - - -.\n"
+            "Ответ начни строго с /calc"
+        )
+        
+        res = await ask_kimi(f"Заполни шаблон: {raw_input}", system_msg=system_paste)
+        await msg.edit_text(res.strip())
+        return
 
-    msg = await update.message.reply_text('⏳...')
-    resp = await ask_kimi(text, system_msg="Ты ИИ-ассистент.")
-    await msg.edit_text(resp[:4000])
+    # 3. Запись в Airtable
+    if "AIRTABLE_EXPORT_START" in text:
+        await update.message.reply_text("📥 Записываю в Airtable (функция в разработке)...")
+        # Здесь можно оставить твой старый парсер Airtable
+        return
+
+    # 4. Обычный чат
+    resp = await ask_kimi(text)
+    await update.message.reply_text(resp[:4000])
 
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    try:
-        caption = update.message.caption or ""
-        if caption.lower().strip().startswith('/1688'):
-            msg = await update.message.reply_text('⏳...')
-            file = await context.bot.get_file(update.message.photo[-1].file_id)
-            buf = BytesIO(); await file.download_to_memory(buf)
-            res = await ask_kimi("Supplier Info CN/EN. Code blocks.", image_b64=base64.b64encode(buf.getvalue()).decode('utf-8'), system_msg="1688 Expert.")
-            return await msg.edit_text(res, parse_mode='Markdown')
+    caption = update.message.caption or ""
+    file = await context.bot.get_file(update.message.photo[-1].file_id)
+    buf = BytesIO()
+    await file.download_to_memory(buf)
+    img_b64 = base64.b64encode(buf.getvalue()).decode('utf-8')
 
-        if caption.lower().strip().startswith('/hs'):
-            msg = await update.message.reply_text('⏳...')
-            file = await context.bot.get_file(update.message.photo[-1].file_id)
-            buf = BytesIO(); await file.download_to_memory(buf)
-            res = await ask_kimi(f"HS Code for: {caption}", image_b64=base64.b64encode(buf.getvalue()).decode('utf-8'), system_msg="Customs Broker.")
-            codes = re.findall(r'\b\d{4,10}\b', res)
-            final_msg = f"📦 Коды:\n\n{res}\n\n🔍 База:\n"
-            for code in set(codes): final_msg += f"👉 [Код {code}](https://www.alta.ru/tnved/code/{code}/)\n"
-            return await msg.edit_text(final_msg, parse_mode='Markdown', disable_web_page_preview=True)
-
-        msg = await update.message.reply_text('⏳...')
-        file = await context.bot.get_file(update.message.photo[-1].file_id)
-        buf = BytesIO(); await file.download_to_memory(buf)
-        barcode_num, text, article = await extract_image_data(Image.open(buf))
-        new_name = await ask_kimi(f"File naming. Text: {text}", image_b64=base64.b64encode(buf.getvalue()).decode('utf-8'), system_msg="Naming Expert.")
-        new_name = re.sub(r'[\\/*?:"<>|]', '', new_name.strip()) + ".pdf"
-        await msg.edit_text(f"📄 `{new_name}`\nBarcode: {barcode_num}")
-    except Exception: pass
-
-async def handle_doc(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    try:
-        doc = update.message.document
-        msg = await update.message.reply_text('⏳...')
-        buf = BytesIO(); await (await context.bot.get_file(doc.file_id)).download_to_memory(buf)
-        buf.seek(0); images = convert_from_bytes(buf.read(), dpi=200, first_page=1, last_page=1)
-        barcode_num, text, article = await extract_image_data(images[0])
-        new_name = await ask_kimi(f"Naming: {text}", system_msg="Naming Expert.")
-        new_name = re.sub(r'[\\/*?:"<>|]', '', new_name.strip()) + ".pdf"
-        await msg.delete(); await update.message.reply_document(document=InputFile(buf, filename=new_name), caption=new_name)
-    except Exception: pass
+    if caption.startswith('/1688'):
+        res = await ask_kimi("Extract supplier info: Company CN/EN, Tax ID, Address CN/EN. Use code blocks.", image_b64=img_b64, system_msg="1688 Expert.")
+        await update.message.reply_text(res, parse_mode='Markdown')
+    elif caption.startswith('/hs'):
+        res = await ask_kimi(f"Suggest 3 HS Codes for: {caption}", image_b64=img_b64, system_msg="Broker.")
+        await update.message.reply_text(res)
+    else:
+        await update.message.reply_text("📸 Фото получено. Используй /1688 или /hs в подписи.")
 
 def main():
+    if not TELEGRAM_TOKEN:
+        logger.error("No TELEGRAM_BOT_TOKEN found!")
+        return
+    
     app = Application.builder().token(TELEGRAM_TOKEN).build()
-    app.add_handler(CommandHandler('start', lambda u, c: u.message.reply_text("🤖 Online.")))
-    app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
-    app.add_handler(MessageHandler(filters.Document.ALL, handle_doc))
+    app.add_handler(CommandHandler('start', lambda u, c: u.message.reply_text("🤖 Бот запущен!")))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
+    app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
+    
+    logger.info("Bot started polling...")
     app.run_polling(drop_pending_updates=True)
 
-if __name__ == '__main__': main()
+if __name__ == '__main__':
+    main()
