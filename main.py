@@ -34,12 +34,13 @@ async def ask_kimi(prompt: str, image_b64: str = None, system_msg: str = None) -
     if image_b64: content.append({'type': 'image_url', 'image_url': {'url': f'data:image/jpeg;base64,{image_b64}'}})
     messages = [{'role': 'system', 'content': system_msg or 'Ты ИИ-ассистент.'}, {'role': 'user', 'content': content}]
     async with aiohttp.ClientSession() as session:
-        async with session.post('https://api.moonshot.cn/v1/chat/completions', headers=headers, json={'model': model, 'messages': messages, 'temperature': 0.05}) as resp:
+        async with session.post('https://api.moonshot.cn/v1/chat/completions', headers=headers, json={'model': model, 'messages': messages, 'temperature': 0.01}) as resp:
             if resp.status == 200:
                 res = await resp.json()
                 return res['choices'][0]['message']['content']
             return f"Error_{resp.status}"
 
+# Вспомогательные функции для OCR и Airtable
 async def extract_image_data(image: Image.Image):
     barcode_num, text, article = "", "", ""
     try:
@@ -98,28 +99,28 @@ async def send_to_airtable(parsed_data: dict):
         if client_name: record["Клиент"] = client_name 
         table.create(record, typecast=True)
         return True, client_name
-    except Exception as e: return False, str(e)
+    except Exception: return False, "Airtable error"
 
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text
 
-    # КОМАНДА /paste - ГЕНЕРАЦИЯ СООБЩЕНИЯ С КОМАНДОЙ /calc В НАЧАЛЕ
+    # КОМАНДА /paste - СТРОГИЙ ШАБЛОН БЕЗ РАССУЖДЕНИЙ
     if text.startswith('/paste'):
         raw_input = text.replace('/paste', '').strip()
-        msg = await update.message.reply_text("🏗 Подготавливаю сообщение для GS Orders...")
+        msg = await update.message.reply_text("🏗 Формирую данные для GS Orders...")
         
         system_paste = (
-            "Ты помощник для формирования заказов. Твоя задача — строго переформатировать данные пользователя.\n"
-            "ПРАВИЛА:\n"
-            "1. Сообщение ОБЯЗАТЕЛЬНО должно начинаться со строки: /calc\n"
-            "2. Поле 'Закупка' всегда должно быть '-'.\n"
-            "3. Размеры всегда '- - - -'.\n"
-            "4. Шаблон:\n/calc\n\nКлиент: [ID]\n\nТовар [N]:\nНазвание: [Name]\nКоличество: [Qty]\nЦена клиенту: [Price]\nЗакупка: -\nДоставка: [Logistics]\nРазмеры: - - - -\n\nВ конце: Курс клиенту: [X]\nМой курс: [Y]"
+            "Ты — конвертер данных. Твоя единственная задача — перевести свободный текст в формат команды /calc для другого бота.\n"
+            "ЗАПРЕЩЕНО: считать самому, объяснять логику, писать любой текст кроме шаблона.\n"
+            "ФОРМАТ ОТВЕТА:\n"
+            "/calc\n\nКлиент: [Имя/ID]\n\nТовар [N]:\nНазвание: [Name]\nКоличество: [Qty]\nЦена клиенту: [Price]\nЗакупка: -\nДоставка: [Logistics]\nРазмеры: - - - -\n\nКурс клиенту: [X]\nМой курс: [Y]"
         )
         
-        prompt_paste = f"Преврати это в шаблон для GS Orders (начни с /calc):\n{raw_input}"
+        prompt_paste = f"Преобразуй это в шаблон /calc для GS Orders:\n{raw_input}"
         
         res = await ask_kimi(prompt_paste, system_msg=system_paste)
+        # Убираем возможные лишние фразы ИИ, если они проскочат
+        res = res.strip()
         return await msg.edit_text(res)
 
     if "AIRTABLE_EXPORT_START" in text:
@@ -127,10 +128,10 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         parsed_data = parse_airtable_export(text)
         success, info = await send_to_airtable(parsed_data)
         if success: await msg.edit_text(f"✅ Заказ **{parsed_data.get('Invoice_ID', 'N/A')}** добавлен!")
-        else: await msg.edit_text(f"❌ Ошибка: {info}")
+        else: await msg.edit_text(f"❌ Ошибка записи.")
         return
 
-    if "COMMERCIAL INVOICE" in text or text.startswith('/calc'): return 
+    if text.startswith('/calc') or "COMMERCIAL INVOICE" in text: return 
 
     msg = await update.message.reply_text('⏳ Думаю...')
     resp = await ask_kimi(text)
@@ -140,11 +141,10 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         caption = update.message.caption or ""
         if caption.lower().strip().startswith('/1688'):
-            product_cat = caption.replace('/1688', '').strip()
             msg = await update.message.reply_text('⏳ Данные поставщика...')
             file = await context.bot.get_file(update.message.photo[-1].file_id)
             buf = BytesIO(); await file.download_to_memory(buf)
-            prompt = f"Данные для: {product_cat}\nCompany (CN/EN), Tax ID, Address (CN/EN), Phone. Без эмодзи. Код блоки для значений."
+            prompt = "Company (CN/EN), Tax ID, Address (CN/EN), Phone. Без эмодзи. Код блоки для значений."
             res = await ask_kimi(prompt, image_b64=base64.b64encode(buf.getvalue()).decode('utf-8'), system_msg="Эксперт 1688.")
             return await msg.edit_text(res, parse_mode='Markdown')
 
@@ -152,7 +152,7 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
             msg = await update.message.reply_text('⏳ Коды ТН ВЭД...')
             file = await context.bot.get_file(update.message.photo[-1].file_id)
             buf = BytesIO(); await file.download_to_memory(buf)
-            prompt = f"Подбери 3 кода ТН ВЭД. Описание: {caption.replace('/hs', '')}. Если витрина - читай состав на китайском."
+            prompt = f"Подбери 3 кода ТН ВЭД. Описание: {caption.replace('/hs', '')}."
             res = await ask_kimi(prompt, image_b64=base64.b64encode(buf.getvalue()).decode('utf-8'), system_msg="Брокер ЕАЭС.")
             codes = re.findall(r'\b\d{4,10}\b', res)
             final_msg = f"📦 **Результаты:**\n\n{res}\n\n🔍 **Alta.ru:**\n"
@@ -166,7 +166,7 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         new_name = await ask_kimi(f"Текст: {text[:1000]}\nШтрихкод: {barcode_num}", image_b64=base64.b64encode(buf.getvalue()).decode('utf-8'), system_msg=SYSTEM_MSG_NAMING)
         new_name = re.sub(r'[\\/*?:"<>|]', '', new_name.strip()) + ".pdf"
         await msg.edit_text('\n'.join(build_response_lines(new_name, barcode_num, article)), parse_mode='Markdown', disable_web_page_preview=True)
-    except Exception as e: await update.message.reply_text(f'❌ Ошибка: {str(e)[:100]}')
+    except Exception: pass
 
 async def handle_doc(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
