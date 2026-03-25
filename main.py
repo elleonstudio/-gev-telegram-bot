@@ -82,9 +82,9 @@ def build_response_lines(new_name, barcode_num, article):
     return response_lines
 
 def parse_airtable_export(text: str) -> dict:
-    """Извлекает данные и ИДЕАЛЬНО сохраняет структуру чека"""
     parsed = {}
     
+    # 1. Извлекаем AIRTABLE_EXPORT
     match = re.search(r'AIRTABLE_EXPORT_START(.*?)AIRTABLE_EXPORT_END', text, re.DOTALL)
     if match:
         for line in match.group(1).strip().split('\n'):
@@ -92,13 +92,36 @@ def parse_airtable_export(text: str) -> dict:
                 key, val = line.split(':', 1)
                 parsed[key.strip()] = val.strip()
 
-    # Вырезаем всё, что до технического блока, сохраняя абзацы
+    # 2. Вытаскиваем товары
     invoice_body = text.split('AIRTABLE_EXPORT_START')[0]
-    invoice_body = re.sub(r'COMMERCIAL INVOICE:[^\n]*\n?', '', invoice_body, flags=re.IGNORECASE)
-    invoice_body = re.sub(r'📅?\s*Date:[^\n]*\n?', '', invoice_body, flags=re.IGNORECASE)
-    invoice_body = re.sub(r'[✅📅💰💼⚠️📦📊💾📑]', '', invoice_body)
     
-    parsed["Invoice_Body"] = invoice_body.strip()
+    compact_items = []
+    # Вариант 1: Ищем старый длинный формат и сжимаем его
+    pattern_old = r'•\s*(.*?)\s*[—\-].*?\n\s*([\d\.]+)\s*[×xX]\s*([\d\.]+)\s*(?:\+\s*([\d\.]+))?\s*=\s*([\d\.]+)[¥Y]?'
+    matches_old = re.findall(pattern_old, invoice_body)
+    
+    if matches_old:
+        for match_item in matches_old:
+            name, qty, price, log, total = match_item
+            log_str = f"+{log}" if log else ""
+            compact_items.append(f"• {name.strip()}: {qty}x{price}{log_str} = {total} ¥")
+    else:
+        # Вариант 2: Формат уже новый компактный (одна строка)
+        for line in invoice_body.split('\n'):
+            line = line.strip()
+            if line.startswith('•') and '=' in line:
+                compact_items.append(line)
+    
+    # Собираем их в единый список для поля "Заказ"
+    if compact_items:
+        parsed["Invoice_Body"] = "\n".join(compact_items)
+    else:
+        # Резервный вариант: чистим текст от мусора
+        clean_text = re.sub(r'COMMERCIAL INVOICE:[^\n]*\n?', '', invoice_body, flags=re.IGNORECASE)
+        clean_text = re.sub(r'📅?\s*Date:[^\n]*\n?', '', clean_text, flags=re.IGNORECASE)
+        clean_text = re.sub(r'[✅📅💰💼⚠️📦📊💾📑]', '', clean_text)
+        parsed["Invoice_Body"] = clean_text.strip()
+        
     return parsed
 
 async def send_to_airtable(parsed_data: dict):
@@ -153,7 +176,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         success, info = await send_to_airtable(parsed_data)
         if success:
             client_info = f" (Клиент: {info})" if info else ""
-            await msg.edit_text(f"✅ Заказ **{parsed_data.get('Invoice_ID', 'N/A')}** успешно добавлен в Airtable{client_info}!\n\nТекст заказа загружен с сохранением структуры.", parse_mode="Markdown")
+            await msg.edit_text(f"✅ Заказ **{parsed_data.get('Invoice_ID', 'N/A')}** успешно добавлен в Airtable{client_info}!\n\nТекст заказа загружен в новом компактном формате.", parse_mode="Markdown")
         else:
             await msg.edit_text(f"❌ Ошибка записи в Airtable: {info}")
         return
