@@ -197,12 +197,32 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         caption = update.message.caption or ""
         if caption.lower().strip().startswith('/hs'):
-            msg = await update.message.reply_text('⏳ Подбираю коды ТН ВЭД (ЕАЭС)...')
+            msg = await update.message.reply_text('⏳ Анализирую товар и вероятные материалы для ТН ВЭД...')
             file = await context.bot.get_file(update.message.photo[-1].file_id)
             buf = BytesIO()
             await file.download_to_memory(buf)
-            res = await ask_kimi(f"Подбери 2-3 наиболее вероятных 10-значных кода ТН ВЭД ЕАЭС для товара на фото. Описание: {caption.replace('/hs', '')}", image_b64=base64.b64encode(buf.getvalue()).decode('utf-8'), system_msg="Ты таможенный декларант ЕАЭС.")
-            codes = set(re.findall(r'(?i)(\d{4,10})', res))
+            
+            # УНИВЕРСАЛЬНЫЙ СИСТЕМНЫЙ ПРОМПТ БРОКЕРА
+            system_broker = (
+                "Ты профессиональный таможенный декларант ЕАЭС с 15-летним стажем. "
+                "Твое главное правило: по фотографии часто невозможно на 100% определить состав товара "
+                "(например: стекло или фарфор, трикотаж или тканый текстиль, пластик или металл, натуральная кожа или кожзам). "
+                "Поэтому ты ВСЕГДА предполагаешь 2-3 наиболее вероятных материала для товара на фото "
+                "и выдаешь разные коды ТН ВЭД для каждого из этих материалов, чтобы клиент мог выбрать точный."
+            )
+            
+            # УНИВЕРСАЛЬНЫЙ ЗАПРОС
+            user_prompt = (
+                f"Подбери 3 наиболее вероятных 10-значных кода ТН ВЭД ЕАЭС для товара на фото.\n"
+                f"Дополнительное описание от клиента: {caption.replace('/hs', '').strip()}\n\n"
+                f"Если материал неочевиден, обязательно дай коды для разных материалов (например: 'Если это керамика — код Х, если стекло — код Y').\n\n"
+                f"Формат ответа СТРОГО такой:\n"
+                f"КОД: [10 цифр]\nОПИСАНИЕ: [Какой это товар и для какого МАТЕРИАЛА/СОСТАВА применяется этот код]\n"
+            )
+            
+            res = await ask_kimi(user_prompt, image_b64=base64.b64encode(buf.getvalue()).decode('utf-8'), system_msg=system_broker)
+            
+            codes = set(re.findall(r'(?i)(\d{10})', res))
             final_msg = f"📦 **Предполагаемые коды ТН ВЭД:**\n\n{res}\n\n🔍 **Проверить на Alta.ru:**\n"
             for code in codes:
                 if len(code) >= 4: final_msg += f"👉 [Код {code}](https://www.alta.ru/tnved/code/{code}/)\n"
