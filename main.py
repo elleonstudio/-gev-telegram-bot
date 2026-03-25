@@ -83,77 +83,41 @@ def build_response_lines(new_name, barcode_num, article):
 
 def parse_airtable_export(text: str) -> dict:
     parsed = {}
-    
     match = re.search(r'AIRTABLE_EXPORT_START(.*?)AIRTABLE_EXPORT_END', text, re.DOTALL)
     if match:
         for line in match.group(1).strip().split('\n'):
             if ':' in line:
                 key, val = line.split(':', 1)
                 parsed[key.strip()] = val.strip()
-
     invoice_body = text.split('AIRTABLE_EXPORT_START')[0].strip()
-    
-    compact_items = []
-    lines = invoice_body.split('\n')
-    
-    for i, line in enumerate(lines):
-        line = line.strip()
-        if line.startswith('•') or line.startswith('-'):
-            if '=' in line:
-                compact_items.append(line.replace('¥', '').strip() + ' ¥')
-            else:
-                name_part = line.lstrip('•-').strip()
-                name = re.sub(r'\s*[—\-].*$', '', name_part) 
-                
-                if i + 1 < len(lines):
-                    next_line = lines[i+1].strip()
-                    if '=' in next_line and any(c.isdigit() for c in next_line):
-                        math_str = next_line.replace('×', 'x').replace('¥', '').replace('Y', '').replace(' ', '')
-                        compact_items.append(f"• {name}: {math_str} ¥")
-
-    if compact_items:
-        parsed["Invoice_Body"] = "\n".join(compact_items)
-    else:
-        clean_text = re.sub(r'COMMERCIAL INVOICE:[^\n]*\n?', '', invoice_body, flags=re.IGNORECASE)
-        clean_text = re.sub(r'📅?\s*Date:[^\n]*\n?', '', clean_text, flags=re.IGNORECASE)
-        clean_text = re.sub(r'[✅📅💰💼⚠️📦📊💾📑]', '', clean_text)
-        parsed["Invoice_Body"] = clean_text.strip()
-        
+    items = [l.strip() for l in invoice_body.split('\n') if l.strip().startswith(('•', '-'))]
+    parsed["Invoice_Body"] = "\n".join(items) if items else invoice_body
     return parsed
 
 async def send_to_airtable(parsed_data: dict):
     try:
         api = Api(AIRTABLE_TOKEN)
         table = api.table(AIRTABLE_BASE_ID, AIRTABLE_TABLE_NAME)
-        
         raw_date = parsed_data.get("Date", "")
         formatted_date = datetime.now().strftime("%Y-%m-%d")
         if "." in raw_date:
             d, m, y = raw_date.split(".")
             formatted_date = f"{y}-{m}-{d}"
-
         invoice = parsed_data.get("Invoice_ID", "")
         client_name = ""
         match = re.match(r'^([a-zA-Z]+)-?(\d+)', invoice)
-        if match:
-            client_name = f"{match.group(1).capitalize()}-{match.group(2)}"
-
+        if match: client_name = f"{match.group(1).capitalize()}-{match.group(2)}"
         record = {
-            "Код Карго": invoice,
-            "Дата": formatted_date,
+            "Код Карго": invoice, "Дата": formatted_date,
             "Сумма (¥)": float(parsed_data.get("Sum_Client_CNY", 0)),
             "Реал Цена Закупки (¥)": float(parsed_data.get("Real_Purchase_CNY", 0)),
             "Курс Клиент": float(parsed_data.get("Client_Rate", 0)),
             "Курс Реал": float(parsed_data.get("Real_Rate", 0)),
             "Расход материалов (¥)": float(parsed_data.get("China_Logistics_CNY", 0)),
             "Кол-во коробок": int(parsed_data.get("FF_Boxes_Qty", 0)),
-            "Заказ": parsed_data.get("Invoice_Body", ""),
-            "Карго Статус": "Заказано"
+            "Заказ": parsed_data.get("Invoice_Body", ""), "Карго Статус": "Заказано"
         }
-        
-        if client_name:
-            record["Клиент"] = client_name 
-
+        if client_name: record["Клиент"] = client_name 
         table.create(record, typecast=True)
         return True, client_name
     except Exception as e:
@@ -162,33 +126,14 @@ async def send_to_airtable(parsed_data: dict):
 
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text
-    
-    # 1. Запись в Airtable
     if "AIRTABLE_EXPORT_START" in text:
-        msg = await update.message.reply_text("📥 Вижу отчёт GS Orders. Записываю в базу...")
+        msg = await update.message.reply_text("📥 Записываю в Airtable...")
         parsed_data = parse_airtable_export(text)
-        
-        if not parsed_data:
-            return await msg.edit_text("❌ Ошибка: не удалось прочитать блок данных. Проверь формат.")
-
         success, info = await send_to_airtable(parsed_data)
-        if success:
-            client_info = f" (Клиент: {info})" if info else ""
-            if parsed_data.get("Invoice_Body"):
-                status_text = "📝 Текст заказа успешно загружен!"
-            else:
-                status_text = "⚠️ ВНИМАНИЕ: Поле 'Заказ' пустое! Ты прислал только технический блок."
-            
-            await msg.edit_text(f"✅ Заказ **{parsed_data.get('Invoice_ID', 'N/A')}** успешно добавлен!\n\n{status_text}", parse_mode="Markdown")
-        else:
-            await msg.edit_text(f"❌ Ошибка записи в Airtable: {info}")
+        if success: await msg.edit_text(f"✅ Заказ **{parsed_data.get('Invoice_ID', 'N/A')}** добавлен!")
+        else: await msg.edit_text(f"❌ Ошибка: {info}")
         return
-
-    # 2. БЛОКИРУЕМ БОЛТОВНИ ИИ
-    if "COMMERCIAL INVOICE" in text or "ТОВАРНАЯ ВЕДОМОСТЬ" in text:
-        return 
-
-    # 3. Обычный чат с ИИ
+    if "COMMERCIAL INVOICE" in text or "ТОВАРНАЯ ВЕДОМОСТЬ" in text: return 
     msg = await update.message.reply_text('⏳ Думаю...')
     resp = await ask_kimi(text)
     await msg.edit_text(resp[:4000])
@@ -196,111 +141,72 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         caption = update.message.caption or ""
-        
-        # 1. Сценарий: Парсинг поставщика с 1688
+        # 1. 1688 PARSER
         if caption.lower().strip().startswith('/1688'):
-            msg = await update.message.reply_text('⏳ Читаю иероглифы, перевожу и ищу данные поставщика...')
+            msg = await update.message.reply_text('⏳ Парсинг поставщика...')
             file = await context.bot.get_file(update.message.photo[-1].file_id)
             buf = BytesIO()
             await file.download_to_memory(buf)
-            
-            system_1688 = (
-                "Ты эксперт по китайским юридическим документам и маркетплейсам (1688, Taobao). "
-                "Твоя задача — извлекать точные юридические и контактные данные со скриншотов и делать качественный перевод на английский."
-            )
-            
-            prompt_1688 = (
-                "Найди на скриншоте данные продавца и выведи их строго в таком формате. "
-                "ОБЯЗАТЕЛЬНО переведи название компании и адрес с китайского на английский язык. "
-                "Ищи налоговый номер (统一社会信用代码 - обычно 18 символов).\n"
-                "Если чего-то нет на фото, напиши 'Не найдено'.\n\n"
-                "🏢 Компания (CN): [Оригинальное китайское название]\n"
-                "🏢 Компания (EN): [Перевод названия на английский]\n"
-                "📋 Tax ID: [Налоговый номер]\n"
-                "📍 Адрес (CN): [Оригинальный адрес на китайском]\n"
-                "📍 Адрес (EN): [Перевод адреса на английский]\n"
-                "📞 Телефон: [Номер телефона]"
-            )
-            
-            res = await ask_kimi(prompt_1688, image_b64=base64.b64encode(buf.getvalue()).decode('utf-8'), system_msg=system_1688)
-            return await msg.edit_text(f"📝 **Данные поставщика 1688:**\n\n{res}", parse_mode='Markdown')
+            prompt = "Извлеки данные поставщика (Название CN/EN, Tax ID, Адрес CN/EN, Телефон). Формат: строго списком."
+            res = await ask_kimi(prompt, image_b64=base64.b64encode(buf.getvalue()).decode('utf-8'), system_msg="Ты эксперт 1688.")
+            return await msg.edit_text(f"📝 **Данные 1688:**\n\n{res}")
 
-        # 2. Сценарий: Умный подбор кодов ТН ВЭД (Скриншоты витрин + Фото)
+        # 2. HS CODE / ТН ВЭД (ИСПРАВЛЕННЫЙ)
         if caption.lower().strip().startswith('/hs'):
-            msg = await update.message.reply_text('⏳ Читаю текст витрины и подбираю коды ТН ВЭД...')
+            msg = await update.message.reply_text('⏳ Подбираю РЕАЛЬНЫЕ коды ТН ВЭД...')
             file = await context.bot.get_file(update.message.photo[-1].file_id)
             buf = BytesIO()
             await file.download_to_memory(buf)
             
             system_broker = (
-                "Ты профессиональный таможенный декларант ЕАЭС. Ты умеешь анализировать как обычные фото товаров, "
-                "так и скриншоты с витрин китайских магазинов (1688, Taobao).\n"
-                "1. Если на фото есть текст (название товара, характеристики на китайском или английском), "
-                "ОБЯЗАТЕЛЬНО прочитай и переведи его, чтобы точно узнать состав (например, 100% хлопок, ПВХ, керамика). "
-                "Если материал четко указан в тексте — выдай точные коды именно для этого материала.\n"
-                "2. Если текста нет и материал по фото неочевиден — выдай 2-3 варианта для разных возможных материалов."
+                "Ты таможенный брокер ЕАЭС. Используй ТОЛЬКО реально существующие коды ТН ВЭД ЕАЭС (10 знаков). "
+                "Никогда не выдумывай окончания кодов. Если сомневаешься в материале, дай варианты для разных материалов (трикотаж 61 группа, текстиль 62 группа)."
             )
             
             user_prompt = (
-                f"Подбери 2-3 наиболее вероятных 10-значных кода ТН ВЭД ЕАЭС.\n"
-                f"Доп. описание от клиента: {caption.replace('/hs', '').strip()}\n\n"
-                f"Внимательно изучи текст на картинке. Если нашел состав/материал — опирайся на него!\n\n"
-                f"Формат ответа СТРОГО такой:\n"
-                f"КОД: [10 цифр]\nОПИСАНИЕ: [Какой это товар. Обязательно укажи, из какого он материала. Если материал прочитан со скриншота — напиши об этом.]\n"
+                f"Подбери 3 наиболее точных кода ТН ВЭД ЕАЭС. Описание: {caption.replace('/hs', '').strip()}\n"
+                "Если на картинке витрина 1688 — прочитай состав на китайском!\n"
+                "Формат: КОД: [10 цифр]\nОПИСАНИЕ: [Почему подходит]\n"
             )
             
             res = await ask_kimi(user_prompt, image_b64=base64.b64encode(buf.getvalue()).decode('utf-8'), system_msg=system_broker)
-            
-            codes = set(re.findall(r'(?i)(\d{10})', res))
-            final_msg = f"📦 **Предполагаемые коды ТН ВЭД:**\n\n{res}\n\n🔍 **Проверить на Alta.ru:**\n"
-            for code in codes:
-                if len(code) >= 4: final_msg += f"👉 [Код {code}](https://www.alta.ru/tnved/code/{code}/)\n"
+            codes = set(re.findall(r'\b\d{10}\b', res))
+            final_msg = f"📦 **Предполагаемые коды:**\n\n{res}\n\n🔍 **Alta.ru:**\n"
+            for code in codes: final_msg += f"👉 [Код {code}](https://www.alta.ru/tnved/code/{code}/)\n"
             return await msg.edit_text(final_msg, parse_mode='Markdown', disable_web_page_preview=True)
 
-        # 3. Сценарий: Просто фото (Создание имени файла)
-        msg = await update.message.reply_text('⏳ Обработка фото для создания имени файла...')
+        # 3. LABEL NAMING
+        msg = await update.message.reply_text('⏳ Обработка этикетки...')
         file = await context.bot.get_file(update.message.photo[-1].file_id)
         buf = BytesIO()
         await file.download_to_memory(buf)
         barcode_num, text, article = await extract_image_data(Image.open(buf))
-        new_name = await ask_kimi(f"Текст: {text[:2000]}\nШтрих-код: {barcode_num}\nАртикул: {article}\nТолько имя файла в формате 中文_English_Размер_Артикул_Штрихкод.pdf:", image_b64=base64.b64encode(buf.getvalue()).decode('utf-8'), system_msg=SYSTEM_MSG_NAMING)
-        new_name = re.sub(r'[\\/*?:"\u003c\u003e|]', '', new_name.strip())
-        if not new_name.endswith('.pdf'): new_name += '.pdf'
-        if len(new_name) < 10: new_name = f"Товар_Unknown_{barcode_num if barcode_num else '000'}.pdf"
-        await msg.edit_text('\n'.join(build_response_lines(re.sub(r'_{2,}', '_', new_name), barcode_num, article)), parse_mode='Markdown', disable_web_page_preview=True)
-        
-    except Exception as e:
-        await update.message.reply_text(f'❌ Ошибка: {str(e)[:200]}')
+        new_name = await ask_kimi(f"Текст: {text[:1000]}\nШтрихкод: {barcode_num}\nАртикул: {article}", image_b64=base64.b64encode(buf.getvalue()).decode('utf-8'), system_msg=SYSTEM_MSG_NAMING)
+        new_name = re.sub(r'[\\/*?:"<>|]', '', new_name.strip()) + ".pdf"
+        await msg.edit_text('\n'.join(build_response_lines(new_name, barcode_num, article)), parse_mode='Markdown', disable_web_page_preview=True)
+    except Exception as e: await update.message.reply_text(f'❌ Ошибка: {str(e)[:100]}')
 
 async def handle_doc(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         doc = update.message.document
-        if doc.file_size > 20 * 1024 * 1024: return await update.message.reply_text('❌ Файл слишком большой (>20MB)')
-        msg = await update.message.reply_text('⏳ Обработка PDF...')
+        msg = await update.message.reply_text('⏳ PDF...')
         buf = BytesIO()
         await (await context.bot.get_file(doc.file_id)).download_to_memory(buf)
         buf.seek(0)
-        images = convert_from_bytes(buf.read(), dpi=250, first_page=1, last_page=1)
-        if not images: return await msg.edit_text('❌ Не удалось открыть PDF')
+        images = convert_from_bytes(buf.read(), dpi=200, first_page=1, last_page=1)
         barcode_num, text, article = await extract_image_data(images[0])
-        new_name = await ask_kimi(f"Текст: {text[:2000]}\nШтрих-код: {barcode_num}\nАртикул: {article}\nТолько имя файла в формате 中文_English_Размер_Артикул_Штрихкод.pdf:", system_msg=SYSTEM_MSG_NAMING)
-        new_name = re.sub(r'[\\/*?:"\u003c\u003e|]', '', new_name.strip())
-        if not new_name.endswith('.pdf'): new_name += '.pdf'
-        if len(new_name) < 10: new_name = f"Товар_Unknown_{barcode_num if barcode_num else '000'}.pdf"
+        new_name = await ask_kimi(f"Текст: {text[:1000]}", system_msg=SYSTEM_MSG_NAMING)
+        new_name = re.sub(r'[\\/*?:"<>|]', '', new_name.strip()) + ".pdf"
         await msg.delete()
-        await update.message.reply_text('\n'.join(build_response_lines(re.sub(r'_{2,}', '_', new_name), barcode_num, article)), parse_mode='Markdown', disable_web_page_preview=True)
-        buf.seek(0)
         await update.message.reply_document(document=InputFile(buf, filename=new_name), caption=new_name)
-    except Exception as e:
-        await update.message.reply_text(f'❌ Ошибка: {str(e)[:200]}')
+    except Exception as e: await update.message.reply_text(f'❌ Ошибка: {str(e)[:100]}')
 
 def main():
     app = Application.builder().token(TELEGRAM_TOKEN).build()
-    app.add_handler(CommandHandler('start', lambda u, c: u.message.reply_text("🤖 Бот готов! Жду фото, PDF или отчет из GS Orders.")))
+    app.add_handler(CommandHandler('start', lambda u, c: u.message.reply_text("🤖 Бот готов!")))
     app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
     app.add_handler(MessageHandler(filters.Document.ALL, handle_doc))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
     app.run_polling(drop_pending_updates=True)
 
-if __name__ == '__main__':
-    main()
+if __name__ == '__main__': main()
