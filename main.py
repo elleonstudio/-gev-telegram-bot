@@ -84,7 +84,7 @@ def build_response_lines(new_name, barcode_num, article):
 def parse_airtable_export(text: str) -> dict:
     parsed = {}
     
-    # 1. Извлекаем AIRTABLE_EXPORT
+    # 1. Извлекаем цифры
     match = re.search(r'AIRTABLE_EXPORT_START(.*?)AIRTABLE_EXPORT_END', text, re.DOTALL)
     if match:
         for line in match.group(1).strip().split('\n'):
@@ -92,35 +92,20 @@ def parse_airtable_export(text: str) -> dict:
                 key, val = line.split(':', 1)
                 parsed[key.strip()] = val.strip()
 
-    # 2. Вытаскиваем товары (всё, что было НАД техническим блоком)
+    # 2. Вытаскиваем товары для поля ЗАКАЗ
     invoice_body = text.split('AIRTABLE_EXPORT_START')[0].strip()
     
-    compact_items = []
-    lines = invoice_body.split('\n')
-    
-    for i, line in enumerate(lines):
+    items = []
+    # Ищем все строчки, которые начинаются с буллита (маркера списка)
+    for line in invoice_body.split('\n'):
         line = line.strip()
-        # Ищем строки, начинающиеся с буллита
         if line.startswith('•') or line.startswith('-'):
-            if '=' in line:
-                # Это новый компактный формат
-                compact_items.append(line.replace('¥', '').strip() + ' ¥')
-            else:
-                # Это старый длинный формат (сжимаем его)
-                name_part = line.lstrip('•-').strip()
-                name = re.sub(r'\s*[—\-].*$', '', name_part) # Убираем " — 10 шт"
-                
-                if i + 1 < len(lines):
-                    next_line = lines[i+1].strip()
-                    if '=' in next_line and any(c.isdigit() for c in next_line):
-                        math_str = next_line.replace('×', 'x').replace('¥', '').replace('Y', '').replace(' ', '')
-                        compact_items.append(f"• {name}: {math_str} ¥")
-
-    # Сохраняем результат
-    if compact_items:
-        parsed["Invoice_Body"] = "\n".join(compact_items)
+            items.append(line)
+    
+    if items:
+        parsed["Invoice_Body"] = "\n".join(items)
     else:
-        # Резервная чистка, если регулярки ничего не нашли
+        # Резервный план, если маркеров нет
         clean_text = re.sub(r'COMMERCIAL INVOICE:[^\n]*\n?', '', invoice_body, flags=re.IGNORECASE)
         clean_text = re.sub(r'📅?\s*Date:[^\n]*\n?', '', clean_text, flags=re.IGNORECASE)
         clean_text = re.sub(r'[✅📅💰💼⚠️📦📊💾📑]', '', clean_text)
@@ -180,14 +165,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         success, info = await send_to_airtable(parsed_data)
         if success:
             client_info = f" (Клиент: {info})" if info else ""
-            
-            # Умное предупреждение, если забыл скопировать товары
-            if parsed_data.get("Invoice_Body"):
-                status_text = "📝 Текст заказа успешно загружен!"
-            else:
-                status_text = "⚠️ ВНИМАНИЕ: Поле 'Заказ' пустое! Ты прислал только технический блок без списка товаров над ним."
-            
-            await msg.edit_text(f"✅ Заказ **{parsed_data.get('Invoice_ID', 'N/A')}** успешно добавлен в Airtable{client_info}!\n\n{status_text}", parse_mode="Markdown")
+            await msg.edit_text(f"✅ Заказ **{parsed_data.get('Invoice_ID', 'N/A')}** успешно добавлен!\n\n📑 Текст заказа загружен в НОВОМ формате.", parse_mode="Markdown")
         else:
             await msg.edit_text(f"❌ Ошибка записи в Airtable: {info}")
         return
