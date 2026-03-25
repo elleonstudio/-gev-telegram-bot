@@ -100,15 +100,30 @@ def build_response_lines(new_name, barcode_num, article):
 # --- ИНТЕГРАЦИЯ С AIRTABLE ---
 
 def parse_airtable_export(text: str) -> dict:
-    """Моментально извлекает данные из блока GS Orders без участия ИИ"""
+    """Извлекает данные и очищает текстовое описание заказа"""
+    # 1. Парсим технический блок
     match = re.search(r'AIRTABLE_EXPORT_START(.*?)AIRTABLE_EXPORT_END', text, re.DOTALL)
-    if not match: return {}
-    
     parsed = {}
-    for line in match.group(1).strip().split('\n'):
-        if ':' in line:
-            key, val = line.split(':', 1)
-            parsed[key.strip()] = val.strip()
+    if match:
+        for line in match.group(1).strip().split('\n'):
+            if ':' in line:
+                key, val = line.split(':', 1)
+                parsed[key.strip()] = val.strip()
+
+    # 2. Вырезаем технический блок из сообщения, оставляя только текст чека
+    invoice_body = re.sub(r'AIRTABLE_EXPORT_START.*?AIRTABLE_EXPORT_END', '', text, flags=re.DOTALL)
+
+    # 3. Чистим текст: удаляем шапку, дату и эмодзи
+    invoice_body = re.sub(r'COMMERCIAL INVOICE:[^\n]*\n?', '', invoice_body, flags=re.IGNORECASE)
+    invoice_body = re.sub(r'📅?\s*Date:[^\n]*\n?', '', invoice_body, flags=re.IGNORECASE)
+    
+    # Удаляем популярные эмодзи и меняем красивую точку на обычное тире
+    invoice_body = re.sub(r'[✅📅💰💼⚠️📦📊💾📑]', '', invoice_body)
+    invoice_body = invoice_body.replace('•', '-')
+
+    # Сохраняем чистый текст инвойса в наш словарь
+    parsed["Invoice_Body"] = invoice_body.strip()
+    
     return parsed
 
 async def send_to_airtable(parsed_data: dict):
@@ -124,14 +139,14 @@ async def send_to_airtable(parsed_data: dict):
             d, m, y = raw_date.split(".")
             formatted_date = f"{y}-{m}-{d}"
 
-        # Нормализация имени клиента из Инвойса (ZAVEN8291-260325 -> Zaven-8291)
+        # Нормализация имени клиента из Инвойса
         invoice = parsed_data.get("Invoice_ID", "")
         client_name = ""
         match = re.match(r'^([a-zA-Z]+)-?(\d+)', invoice)
         if match:
             client_name = f"{match.group(1).capitalize()}-{match.group(2)}"
 
-        # Формируем запись строго по твоим колонкам
+        # Формируем запись
         record = {
             "Код Карго": invoice,
             "Дата": formatted_date,
@@ -141,15 +156,13 @@ async def send_to_airtable(parsed_data: dict):
             "Курс Реал": float(parsed_data.get("Real_Rate", 0)),
             "Расход материалов (¥)": float(parsed_data.get("China_Logistics_CNY", 0)),
             "Кол-во коробок": int(parsed_data.get("FF_Boxes_Qty", 0)),
-            "Заказ": f"Количество товаров: {parsed_data.get('Total_Qty', 0)} шт.",
+            "Заказ": parsed_data.get("Invoice_Body", ""), # <--- ВОТ ЗДЕСЬ ЗАЛИВАЕТСЯ ТЕКСТ ИНВОЙСА
             "Карго Статус": "Заказано"
         }
         
-        # Если удалось вытащить клиента, привязываем его
         if client_name:
-            record["Клиент"] = client_name # Используем typecast=True для автоматической связи
+            record["Клиент"] = client_name 
 
-        # typecast=True обязателен для связи Linked Records (Клиент) и дат!
         table.create(record, typecast=True)
         return True, client_name
     except Exception as e:
