@@ -47,7 +47,7 @@ def is_valid_ean13(barcode: str) -> bool:
     return checksum == expected_checksum
 
 def clean_response(text: str) -> str:
-    """Удаляет лишний мусор и Markdown из ответа"""
+    """Удаляет лишний мусор из ответа"""
     garbage = [
         r'^\d+\.', r'ОПРЕДЕЛИ.*?:', r'ВЫБЕРИ.*?:', r'ВЫПОЛНИ.*?:', 
         r'АНАЛИЗИРУЮ.*?:', r'РАССУЖДАЮ.*?:', r'---', r'===', 
@@ -109,7 +109,7 @@ async def ask_kimi(prompt: str, image_b64: str = None, system_msg: str = None) -
         return f"Error_API_Request"
 
 async def extract_image_data(image: Image.Image):
-    """Единая функция извлечения данных из картинки: штрихкод, текст, артикул"""
+    """Единая функция извлечения данных из картинки"""
     barcode_num = ""
     text = ""
     article = ""
@@ -147,9 +147,8 @@ async def get_naming_prompt(text: str, barcode_num: str, article: str) -> str:
         f"Создай строго структурированное имя файла для товара на основе предоставленных данных.\n\n"
         f"ВХОДНЫЕ ДАННЫЕ:\n"
         f"- Распознанный текст этикетки:\n\"{text[:2000]}\"\n"
-        f"- Штрих-код (если найден): {barcode_num if barcode_num else 'не найден'}\n"
-        f"- Артикул (если найден): {article if article else 'не найден'}\n"
-        f"- Если предоставлено фото, проанализируй и его.\n\n"
+        f"- Штрих-код: {barcode_num if barcode_num else 'не найден'}\n"
+        f"- Артикул: {article if article else 'не найден'}\n\n"
         f"ПОРЯДОК ДЕЙСТВИЙ ДЛЯ ТЕБЯ:\n"
         f"1. Пойми, что это за товар.\n"
         f"2. ПЕРЕВЕДИ на китайский (简体中文).\n"
@@ -159,22 +158,40 @@ async def get_naming_prompt(text: str, barcode_num: str, article: str) -> str:
         f"ОТВЕТЬ ТОЛЬКО ИМЕНЕМ ФАЙЛА:"
     )
 
+def build_response_lines(new_name, barcode_num, article):
+    """Формирует текстовый ответ с проверками штрих-кода и ссылками WB"""
+    response_lines = [f"📄 `{new_name}`"]
+    
+    if barcode_num:
+        if is_valid_ean13(barcode_num):
+            response_lines.insert(0, f"✅ Штрих-код: {barcode_num} (Читается + формат EAN-13 верен)")
+        else:
+            response_lines.insert(0, f"⚠️ Штрих-код: {barcode_num} (Читается, НО ОШИБКА ФОРМАТА! Возможно, сгенерирован неверно)")
+    else:
+        response_lines.insert(0, "❌ Штрих-код: НЕ НАЙДЕН НА ИЗОБРАЖЕНИИ")
+
+    if article:
+        wb_link = f"https://www.wildberries.ru/catalog/{article}/detail.aspx"
+        response_lines.insert(1, f"✅ Артикул: {article} 👉 [Посмотреть на WB]({wb_link})")
+        
+    return response_lines
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     welcome_text = (
         "🤖 Привет! Я твой ассистент по товарам.\n\n"
         "📁 **Сгенерировать имя файла:** Отправь фото или PDF с этикеткой.\n"
-        "📦 **Подобрать HS code (ЕАЭС/Армения):** Отправь фото с подписью `/hs [описание]`."
+        "📦 **Подобрать HS code (ЕАЭС):** Отправь фото с подписью `/hs [описание]`."
     )
     await update.message.reply_text(welcome_text, parse_mode='Markdown')
 
-async def handle_hs(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Обработка команды /hs для поиска кода ТН ВЭД"""
-    try:
-        if not update.message.photo:
-            await update.message.reply_text('❌ Отправь команду /hs вместе с фотографией товара (прикрепи фото и напиши /hs в описании).')
-            return
+async def handle_hs_text_error(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Если пользователь отправил команду /hs без фото"""
+    await update.message.reply_text('❌ Отправь команду /hs вместе с фотографией товара (прикрепи фото и напиши /hs в описании).')
 
-        msg = await update.message.reply_text('⏳ Изучаю товар и подбираю коды ТН ВЭД для Армении (ЕАЭС)...')
+async def process_hs(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Основная логика для обработки HS кодов"""
+    try:
+        msg = await update.message.reply_text('⏳ Изучаю товар и подбираю коды ТН ВЭД (ЕАЭС)...')
         
         photo = update.message.photo[-1]
         file = await context.bot.get_file(photo.file_id)
@@ -184,11 +201,12 @@ async def handle_hs(update: Update, context: ContextTypes.DEFAULT_TYPE):
         image_b64 = base64.b64encode(buf.getvalue()).decode('utf-8')
         
         caption = update.message.caption if update.message.caption else ""
-        user_desc = caption.replace('/hs', '').strip()
+        # Убираем команду из описания, чтобы передать нейросети чистый текст
+        user_desc = re.sub(r'(?i)/hs', '', caption).strip()
         
         system_msg_hs = "Ты опытный таможенный декларант ЕАЭС (Армения)."
         prompt_hs = f"""Внимательно изучи фото товара. 
-Дополнительное описание от пользователя: "{user_desc if user_desc else 'нет описания'}".
+Дополнительное описание: "{user_desc if user_desc else 'нет описания'}".
 
 Определи, что это за товар, из какого материала он сделан, и подбери 2-3 наиболее вероятных кода ТН ВЭД ЕАЭС.
 
@@ -198,8 +216,12 @@ async def handle_hs(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         kimi_response = await ask_kimi(prompt_hs, image_b64=image_b64, system_msg=system_msg_hs)
         
+        # Перехват ошибок API (включая лимит 429)
         if kimi_response.startswith("Error"):
-            await msg.edit_text(f'❌ Ошибка при анализе фото: {kimi_response}')
+            if "429" in kimi_response:
+                await msg.edit_text("❌ Ошибка 429: Лимит запросов к нейросети Kimi. Подожди пару минут и попробуй снова.")
+            else:
+                await msg.edit_text(f"❌ Ошибка API при анализе фото: {kimi_response.replace('Error_', '')}")
             return
 
         codes = set(re.findall(r'(?i)КОД:\s*(\d{4,10})', kimi_response))
@@ -220,28 +242,16 @@ async def handle_hs(update: Update, context: ContextTypes.DEFAULT_TYPE):
         logger.error(f"HS error: {e}")
         await update.message.reply_text(f'❌ Ошибка: {str(e)[:200]}')
 
-def build_response_lines(new_name, barcode_num, article):
-    """Формирует текстовый ответ с проверками штрих-кода и ссылками WB"""
-    response_lines = [f"📄 `{new_name}`"]
-    
-    if barcode_num:
-        if is_valid_ean13(barcode_num):
-            response_lines.insert(0, f"✅ Штрих-код: {barcode_num} (Читается + формат EAN-13 верен)")
-        else:
-            response_lines.insert(0, f"⚠️ Штрих-код: {barcode_num} (Читается, НО ОШИБКА ФОРМАТА! Возможно, сгенерирован неверно)")
-    else:
-        response_lines.insert(0, "❌ Штрих-код: НЕ НАЙДЕН НА ИЗОБРАЖЕНИИ")
-
-    if article:
-        wb_link = f"https://www.wildberries.ru/catalog/{article}/detail.aspx"
-        response_lines.insert(1, f"✅ Артикул: {article} 👉 [Посмотреть на WB]({wb_link})")
-        
-    return response_lines
-
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Обработка фото для переименования"""
+    """Главный обработчик всех фото. Распределяет логику."""
     try:
-        msg = await update.message.reply_text('⏳ Обработка фото...')
+        # 1. ПРОВЕРКА МАРШРУТИЗАЦИИ: если есть /hs в подписи - уходим в таможню
+        caption = update.message.caption or ""
+        if caption.lower().strip().startswith('/hs'):
+            return await process_hs(update, context)
+
+        # 2. Иначе - стандартная обработка имени файла
+        msg = await update.message.reply_text('⏳ Обработка фото для создания имени файла...')
         
         photo = update.message.photo[-1]
         file = await context.bot.get_file(photo.file_id)
@@ -255,6 +265,14 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         image_b64 = base64.b64encode(buf.getvalue()).decode('utf-8')
         new_name = await ask_kimi(prompt, image_b64=image_b64, system_msg=SYSTEM_MSG_NAMING)
+        
+        # Перехват ошибок API (чтобы не создавать Error_429.pdf)
+        if new_name.startswith("Error"):
+            if "429" in new_name:
+                await msg.edit_text("❌ Ошибка 429: Лимит запросов к нейросети. Подожди пару минут.")
+            else:
+                await msg.edit_text(f"❌ Ошибка генерации имени: {new_name.replace('Error_', '')}")
+            return
         
         new_name = new_name.strip()
         if not new_name.endswith('.pdf'): new_name += '.pdf'
@@ -272,7 +290,7 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f'❌ Ошибка: {str(e)[:200]}')
 
 async def handle_doc(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Обработка документов (PDF)"""
+    """Обработка документов (PDF и фото документами)"""
     try:
         doc = update.message.document
         original_name = doc.file_name
@@ -289,13 +307,21 @@ async def handle_doc(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not original_name.lower().endswith('.pdf'):
             try:
                 image = Image.open(buf)
-                await msg.edit_text('⏳ Обработка изображения...')
+                await msg.edit_text('⏳ Обработка изображения из документа...')
                 barcode_num, text, article = await extract_image_data(image)
                 
                 prompt = await get_naming_prompt(text, barcode_num, article)
                 image_b64 = base64.b64encode(buf.getvalue()).decode('utf-8')
                 new_name = await ask_kimi(prompt, image_b64=image_b64, system_msg=SYSTEM_MSG_NAMING)
                 
+                # Перехват ошибок
+                if new_name.startswith("Error"):
+                    if "429" in new_name:
+                        await msg.edit_text("❌ Ошибка 429: Лимит запросов к нейросети.")
+                    else:
+                        await msg.edit_text(f"❌ Ошибка API: {new_name.replace('Error_', '')}")
+                    return
+
                 new_name = new_name.strip()
                 if not new_name.endswith('.pdf'): new_name += '.pdf'
                 new_name = re.sub(r'[\\/*?:"\u003c\u003e|]', '', new_name)
@@ -323,6 +349,14 @@ async def handle_doc(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         new_name = await ask_kimi(prompt, system_msg=SYSTEM_MSG_NAMING)
         
+        # Перехват ошибок
+        if new_name.startswith("Error"):
+            if "429" in new_name:
+                await msg.edit_text("❌ Ошибка 429: Лимит запросов к нейросети. Подожди немного.")
+            else:
+                await msg.edit_text(f"❌ Ошибка API: {new_name.replace('Error_', '')}")
+            return
+
         new_name = new_name.strip()
         if not new_name.endswith('.pdf'): new_name += '.pdf'
         new_name = re.sub(r'[\\/*?:"\u003c\u003e|]', '', new_name)
@@ -356,9 +390,12 @@ def main():
     app = Application.builder().token(TELEGRAM_TOKEN).build()
     
     app.add_handler(CommandHandler('start', start))
-    app.add_handler(CommandHandler('hs', handle_hs))
     
-    app.add_handler(MessageHandler(filters.PHOTO & ~filters.COMMAND, handle_photo))
+    # Перехватчик: если отправили /hs просто текстом, без картинки
+    app.add_handler(CommandHandler('hs', handle_hs_text_error)) 
+    
+    # Обработчик фото теперь ловит ВСЕ картинки и сам решает, куда их направить
+    app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
     app.add_handler(MessageHandler(filters.Document.ALL, handle_doc))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
     
