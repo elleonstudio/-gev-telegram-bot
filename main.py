@@ -52,7 +52,6 @@ def generate_vector_label_60x40(barcode_num, article):
             c.drawString(5*mm, 20*mm, f"BC: {barcode_num}")
     if article:
         c.setFont("Helvetica-Bold", 10)
-        # Увеличил лимит символов для отображения на этикетке, чтобы цвет точно влез
         c.drawString(7*mm, 6*mm, f"Art: {article[:40]}")
     c.showPage()
     c.save()
@@ -76,14 +75,15 @@ async def ask_kimi(prompt: str, image_b64: str = None, system_msg: str = "") -> 
 async def get_product_info(text: str, image_b64: str = None) -> dict:
     system_msg = (
         "Ты — парсер этикеток. Извлеки данные.\n"
-        "ДАЖЕ ЕСЛИ ТЕКСТ ТОЛЬКО НА РУССКОМ ИЛИ АНГЛИЙСКОМ, ТЫ ОБЯЗАН ПЕРЕВЕСТИ СУТЬ ТОВАРА НА КИТАЙСКИЙ.\n"
+        "ДАЖЕ ЕСЛИ ТЕКСТ ТОЛЬКО НА РУССКОМ ИЛИ АНГЛИЙСКОМ, ТЫ ОБЯЗАН ПЕРЕВЕСТИ СУТЬ ТОВАРА НА КИТАЙСКИЙ И АНГЛИЙСКИЙ.\n"
+        "ВНИМАНИЕ: Если у товара есть ЦВЕТ (например, blue), ОБЯЗАТЕЛЬНО переведи его и добавь в cn_name и en_name!\n"
         "Верни ТОЛЬКО чистый JSON:\n"
         "{\n"
-        '  "cn_name": "Китайский перевод (например: 梳子)",\n'
-        '  "en_name": "Английский перевод без пробелов",\n'
+        '  "cn_name": "Китайский перевод: ЦВЕТ + ТИП ТОВАРА (например: 蓝色梳子)",\n'
+        '  "en_name": "Английский перевод: ЦВЕТ + ТИП ТОВАРА без пробелов (например: BlueHairbrush)",\n'
         '  "size": "Размер (если есть)",\n'
         '  "article": "Основной артикул",\n'
-        '  "color": "Цвет товара (например: blue, black, розовый). ИЩИ ЕГО ВНИМАТЕЛЬНО, он может быть перенесен на новую строку!"\n'
+        '  "color": "Цвет товара точно как на этикетке (например: blue, розовый). ИЩИ ЕГО ВНИМАТЕЛЬНО, он может быть на новой строке!"\n'
         "}\n"
         "ЗАПРЕЩЕНО использовать русские буквы в cn_name и en_name!"
     )
@@ -106,20 +106,16 @@ def build_filename(info: dict, regex_article: str, barcode: str) -> tuple:
     en = re.sub(r'[а-яА-ЯёЁ\s]', '', str(info.get("en_name", "")))
     size = re.sub(r'\s', '', str(info.get("size", "")))
     
-    # 1. Достаем артикул и цвет от ИИ
     ai_art = str(info.get("article", "")).strip()
     color = str(info.get("color", "")).strip()
     
-    # 2. Склеиваем артикул и цвет, если цвет найден
     if color and color.lower() not in ['none', 'null', '无', 'нет', '']:
         if color.lower() not in ai_art.lower():
             ai_art = f"{ai_art} {color}"
             
-    # 3. Сравниваем с регуляркой (на всякий случай)
     reg_art = str(regex_article).strip()
     full_article = ai_art if len(ai_art) > len(reg_art) else reg_art
     
-    # 4. Вычищаем ВСЕ пробелы для имени файла
     clean_article_for_filename = re.sub(r'[\\/*?:"<>|\s]', '', full_article)
     
     parts = []
@@ -130,7 +126,6 @@ def build_filename(info: dict, regex_article: str, barcode: str) -> tuple:
     if not parts: parts = ["Product"]
     new_name = "_".join(parts) + ".pdf"
     
-    # Возвращаем имя файла и полный артикул с пробелами (для текста в чате)
     return new_name, full_article
 
 def find_article_regex(text: str) -> str:
