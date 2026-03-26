@@ -29,6 +29,50 @@ logger = logging.getLogger(__name__)
 TELEGRAM_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
 KIMI_API_KEY = os.getenv('KIMI_API_KEY')
 
+# ЖЕСТКИЙ СЛОВАРЬ ЦВЕТОВ (ИИ сюда не лезет)
+COLORS_DICT = {
+    "blue": {"cn": "蓝色", "en": "Blue"},
+    "синий": {"cn": "蓝色", "en": "Blue"},
+    "синяя": {"cn": "蓝色", "en": "Blue"},
+    "голубой": {"cn": "浅蓝色", "en": "LightBlue"},
+    "голубая": {"cn": "浅蓝色", "en": "LightBlue"},
+    "black": {"cn": "黑色", "en": "Black"},
+    "черный": {"cn": "黑色", "en": "Black"},
+    "чёрный": {"cn": "黑色", "en": "Black"},
+    "черная": {"cn": "黑色", "en": "Black"},
+    "white": {"cn": "白色", "en": "White"},
+    "белый": {"cn": "白色", "en": "White"},
+    "белая": {"cn": "白色", "en": "White"},
+    "red": {"cn": "红色", "en": "Red"},
+    "красный": {"cn": "红色", "en": "Red"},
+    "красная": {"cn": "红色", "en": "Red"},
+    "pink": {"cn": "粉色", "en": "Pink"},
+    "розовый": {"cn": "粉色", "en": "Pink"},
+    "розовая": {"cn": "粉色", "en": "Pink"},
+    "green": {"cn": "绿色", "en": "Green"},
+    "зеленый": {"cn": "绿色", "en": "Green"},
+    "зеленая": {"cn": "绿色", "en": "Green"},
+    "yellow": {"cn": "黄色", "en": "Yellow"},
+    "желтый": {"cn": "黄色", "en": "Yellow"},
+    "желтая": {"cn": "黄色", "en": "Yellow"},
+    "beige": {"cn": "米色", "en": "Beige"},
+    "бежевый": {"cn": "米色", "en": "Beige"},
+    "бежевая": {"cn": "米色", "en": "Beige"},
+    "purple": {"cn": "紫色", "en": "Purple"},
+    "фиолетовый": {"cn": "紫色", "en": "Purple"},
+    "фиолетовая": {"cn": "紫色", "en": "Purple"},
+    "grey": {"cn": "灰色", "en": "Grey"},
+    "gray": {"cn": "灰色", "en": "Grey"},
+    "серый": {"cn": "灰色", "en": "Grey"},
+    "серая": {"cn": "灰色", "en": "Grey"},
+    "brown": {"cn": "棕色", "en": "Brown"},
+    "коричневый": {"cn": "棕色", "en": "Brown"},
+    "коричневая": {"cn": "棕色", "en": "Brown"},
+    "orange": {"cn": "橙色", "en": "Orange"},
+    "оранжевый": {"cn": "橙色", "en": "Orange"},
+    "оранжевая": {"cn": "橙色", "en": "Orange"}
+}
+
 def is_valid_ean13(barcode: str) -> bool:
     if not barcode or len(barcode) != 13 or not barcode.isdigit(): return False
     digits = [int(x) for x in barcode]
@@ -72,17 +116,14 @@ async def ask_kimi(prompt: str, image_b64: str = None, system_msg: str = "") -> 
 
 async def get_product_info(text: str, image_b64: str = None) -> dict:
     system_msg = (
-        "Ты — строгий парсер текста с этикеток.\n"
-        "ГЛАВНОЕ ПРАВИЛО: Ищи цвет ТОЛЬКО в тексте! НЕ угадывай по картинке.\n"
-        "ПЕРЕВОДИ СТРОГО ПО ОТДЕЛЬНЫМ ЯЧЕЙКАМ. Верни ТОЛЬКО чистый JSON:\n"
+        "Ты — парсер этикеток. Переведи ТОЛЬКО тип товара (например, расческа, сковорода).\n"
+        "Цвет переводить НЕ НУЖНО, это сделает код.\n"
+        "Верни ТОЛЬКО чистый JSON:\n"
         "{\n"
-        '  "cn_type": "Китайский перевод типа товара (например: 梳子)",\n'
-        '  "cn_color": "Китайский перевод ЦВЕТА (например: 蓝色). Если цвета нет - пустота",\n'
-        '  "en_type": "Английский перевод типа товара (например: Hairbrush)",\n'
-        '  "en_color": "Английский перевод ЦВЕТА (например: Blue). Если цвета нет - пустота",\n'
+        '  "cn_name": "Китайский перевод типа товара (например: 梳子)",\n'
+        '  "en_name": "Английский перевод типа товара (например: Hairbrush)",\n'
         '  "size": "Размер (если есть)",\n'
-        '  "article": "Основной артикул",\n'
-        '  "raw_color": "Цвет товара СТРОГО ИЗ ТЕКСТА на оригинальном языке (например: blue, розовый)"\n'
+        '  "article": "Артикул без цвета"\n'
         "}\n"
     )
     prompt = f"Текст: {text[:800]}"
@@ -92,38 +133,43 @@ async def get_product_info(text: str, image_b64: str = None) -> dict:
         info = json.loads(clean_res)
         
         t_low = text.lower()
-        if not info.get("cn_type") or info.get("cn_type").lower() in ['none', 'null', '']:
-            if any(x in t_low for x in ["расческа", "梳", "tangle", "brush"]): info["cn_type"] = "梳子"
-            elif any(x in t_low for x in ["маска", "mask", "面"]): info["cn_type"] = "面膜"
+        if not info.get("cn_name") or info.get("cn_name").lower() in ['none', 'null', '']:
+            if any(x in t_low for x in ["расческа", "梳", "tangle", "brush"]): info["cn_name"] = "梳子"
+            elif any(x in t_low for x in ["маска", "mask", "面"]): info["cn_name"] = "面膜"
         return info
     except:
-        return {"cn_type": "商品", "cn_color": "", "en_type": "Product", "en_color": "", "size": "", "article": "", "raw_color": ""}
+        return {"cn_name": "商品", "en_name": "Product", "size": "", "article": ""}
 
-def build_filename(info: dict, regex_article: str, barcode: str) -> tuple:
-    # Изолируем перевод цвета и типа, жестко вычищаем русский
-    cn_color = re.sub(r'[а-яА-ЯёЁ\s]', '', str(info.get("cn_color", "")).replace('None', '').replace('null', ''))
-    cn_type = re.sub(r'[а-яА-ЯёЁ\s]', '', str(info.get("cn_type", "")).replace('None', '').replace('null', ''))
-    # Python сам склеивает китайское: Цвет + Товар
-    cn = cn_color + cn_type
+def build_filename(info: dict, regex_article: str, barcode: str, raw_text: str) -> tuple:
+    # 1. КОД САМ ИЩЕТ ЦВЕТ В ТЕКСТЕ
+    found_cn_color, found_en_color, found_raw_color = "", "", ""
+    text_lower = raw_text.lower()
     
-    en_color = re.sub(r'[а-яА-ЯёЁ\s]', '', str(info.get("en_color", "")).replace('None', '').replace('null', ''))
-    en_type = re.sub(r'[а-яА-ЯёЁ\s]', '', str(info.get("en_type", "")).replace('None', '').replace('null', ''))
-    # Python сам склеивает английское: Цвет + Товар
-    en = en_color + en_type
+    for key, val in COLORS_DICT.items():
+        if re.search(r'\b' + key + r'\b', text_lower):
+            found_cn_color = val["cn"]
+            found_en_color = val["en"]
+            found_raw_color = key
+            break
+
+    # 2. Вычищаем базу (тип товара)
+    cn_type = re.sub(r'[а-яА-ЯёЁ\s]', '', str(info.get("cn_name", "")).replace('None', '').replace('null', ''))
+    en_type = re.sub(r'[а-яА-ЯёЁ\s]', '', str(info.get("en_name", "")).replace('None', '').replace('null', ''))
+    
+    # 3. Склеиваем: Цвет (от кода) + Тип товара (от ИИ)
+    cn = (found_cn_color + cn_type) if found_cn_color else cn_type
+    en = (found_en_color + en_type) if found_en_color else en_type
     
     size = re.sub(r'\s', '', str(info.get("size", "")).replace('None', '').replace('null', ''))
     
     ai_art = str(info.get("article", "")).strip()
-    raw_color = str(info.get("raw_color", "")).strip()
-    
-    # Добавляем оригинальный цвет в артикул
-    if raw_color and raw_color.lower() not in ['none', 'null', '无', 'нет', '']:
-        if raw_color.lower() not in ai_art.lower():
-            ai_art = f"{ai_art} {raw_color}"
-            
     reg_art = str(regex_article).strip()
     full_article = ai_art if len(ai_art) > len(reg_art) else reg_art
     
+    # Добавляем оригинальный цвет в артикул (для отчета и имени файла)
+    if found_raw_color and found_raw_color not in full_article.lower():
+        full_article = f"{full_article} {found_raw_color}"
+        
     clean_article_for_filename = re.sub(r'[\\/*?:"<>|\s]', '', full_article)
     
     parts = []
@@ -156,7 +202,7 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         regex_art = find_article_regex(raw_text)
         
         info = await get_product_info(raw_text, image_b64=img_b64)
-        new_name, final_art = build_filename(info, regex_art, barcode)
+        new_name, final_art = build_filename(info, regex_art, barcode, raw_text)
         
         vector_pdf = generate_vector_label_60x40(barcode, final_art)
         vector_pdf.name = new_name 
@@ -197,7 +243,7 @@ async def handle_doc(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 groups[key]['pages'].append(i)
             else:
                 info = await get_product_info(txt)
-                fname, f_art = build_filename(info, reg_art, bc)
+                fname, f_art = build_filename(info, reg_art, bc, txt)
                 groups[key] = {'pages': [i], 'fname': fname, 'art': f_art, 'bc': bc}
 
         for k, g in groups.items():
