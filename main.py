@@ -29,20 +29,21 @@ logger = logging.getLogger(__name__)
 TELEGRAM_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
 KIMI_API_KEY = os.getenv('KIMI_API_KEY')
 
+# Встроенный словарь цветов для 100% точности
 COLORS_DICT = {
     "blue": {"cn": "蓝色", "en": "Blue"}, "синий": {"cn": "蓝色", "en": "Blue"}, "синяя": {"cn": "蓝色", "en": "Blue"},
-    "голубой": {"cn": "浅蓝色", "en": "LightBlue"},
-    "black": {"cn": "黑色", "en": "Black"}, "черный": {"cn": "黑色", "en": "Black"}, "чёрный": {"cn": "黑色", "en": "Black"},
+    "голубой": {"cn": "浅蓝色", "en": "LightBlue"}, "голубая": {"cn": "浅蓝色", "en": "LightBlue"},
+    "black": {"cn": "黑色", "en": "Black"}, "черный": {"cn": "黑色", "en": "Black"}, "чёрный": {"cn": "黑色", "en": "Black"}, "черная": {"cn": "黑色", "en": "Black"},
     "white": {"cn": "白色", "en": "White"}, "белый": {"cn": "白色", "en": "White"}, "белая": {"cn": "白色", "en": "White"},
     "red": {"cn": "红色", "en": "Red"}, "красный": {"cn": "红色", "en": "Red"}, "красная": {"cn": "红色", "en": "Red"},
     "pink": {"cn": "粉色", "en": "Pink"}, "розовый": {"cn": "粉色", "en": "Pink"}, "розовая": {"cn": "粉色", "en": "Pink"},
     "green": {"cn": "绿色", "en": "Green"}, "зеленый": {"cn": "绿色", "en": "Green"}, "зеленая": {"cn": "绿色", "en": "Green"},
-    "yellow": {"cn": "黄色", "en": "Yellow"}, "желтый": {"cn": "黄色", "en": "Yellow"},
+    "yellow": {"cn": "黄色", "en": "Yellow"}, "желтый": {"cn": "黄色", "en": "Yellow"}, "желтая": {"cn": "黄色", "en": "Yellow"},
     "beige": {"cn": "米色", "en": "Beige"}, "бежевый": {"cn": "米色", "en": "Beige"}, "бежевая": {"cn": "米色", "en": "Beige"},
-    "purple": {"cn": "紫色", "en": "Purple"}, "фиолетовый": {"cn": "紫色", "en": "Purple"},
-    "grey": {"cn": "灰色", "en": "Grey"}, "gray": {"cn": "灰色", "en": "Grey"}, "серый": {"cn": "灰色", "en": "Grey"},
-    "brown": {"cn": "棕色", "en": "Brown"}, "коричневый": {"cn": "棕色", "en": "Brown"},
-    "orange": {"cn": "橙色", "en": "Orange"}, "оранжевый": {"cn": "橙色", "en": "Orange"}
+    "purple": {"cn": "紫色", "en": "Purple"}, "фиолетовый": {"cn": "紫色", "en": "Purple"}, "фиолетовая": {"cn": "紫色", "en": "Purple"},
+    "grey": {"cn": "灰色", "en": "Grey"}, "gray": {"cn": "灰色", "en": "Grey"}, "серый": {"cn": "灰色", "en": "Grey"}, "серая": {"cn": "灰色", "en": "Grey"},
+    "brown": {"cn": "棕色", "en": "Brown"}, "коричневый": {"cn": "棕色", "en": "Brown"}, "коричневая": {"cn": "棕色", "en": "Brown"},
+    "orange": {"cn": "橙色", "en": "Orange"}, "оранжевый": {"cn": "橙色", "en": "Orange"}, "оранжевая": {"cn": "橙色", "en": "Orange"}
 }
 
 STOP_WORDS = ['none', 'null', 'нет', 'не указан', 'не указано', 'отсутствует', '无', '']
@@ -91,7 +92,7 @@ async def ask_kimi(prompt: str, image_b64: str = None, system_msg: str = "") -> 
 async def get_product_info(text: str, image_b64: str = None) -> dict:
     system_msg = (
         "Ты — следователь-аналитик этикеток. Внимательно сканируй текст и извлекай факты. Если явно не написано, ищи по смыслу.\n"
-        "ПРАВИЛО АРТИКУЛА: Артикул ОБЯЗАТЕЛЬНО должен содержать цифры! Если после слова Артикул идут только буквы — игнорируй это. Если цифры есть — забирай строку ЦЕЛИКОМ со всеми приписками и цветами.\n"
+        "ПРАВИЛО АРТИКУЛА: Артикул ОБЯЗАТЕЛЬНО должен содержать цифры! Если после слова Артикул идут только буквы — игнорируй это. Если цифры есть — забирай строку ЦЕЛИКОМ.\n"
         "Верни ТОЛЬКО валидный JSON:\n"
         "{\n"
         '  "ru_type": "Что это за товар на русском (например: Набор аксессуаров, Расческа)",\n'
@@ -103,7 +104,7 @@ async def get_product_info(text: str, image_b64: str = None) -> dict:
         '  "material": "Материал (например: пластик, чугун)",\n'
         '  "complectation": "Комплектация (например: 1 расческа, 2 заколки)",\n'
         '  "characteristics": "Свойства (например: для всех типов волос)",\n'
-        '  "date": "Дата (форматы дат, год)"\n'
+        '  "date": "Дата"\n'
         "}\n"
         "Если данных нет, оставляй строку пустой: \"\""
     )
@@ -123,21 +124,27 @@ async def get_product_info(text: str, image_b64: str = None) -> dict:
 
 def process_product_data(info: dict, regex_article: str, barcode: str, raw_text: str):
     found_cn_color, found_en_color, found_raw_color = "", "", ""
+    color_from_ai = str(info.get("color", "")).strip().lower()
     text_lower = raw_text.lower()
+    
+    # Поиск цвета в словаре (надежный метод)
     for key, val in COLORS_DICT.items():
-        if re.search(r'\b' + key + r'\b', text_lower):
+        if key in color_from_ai or re.search(r'\b' + key + r'\b', text_lower):
             found_cn_color = val["cn"]
             found_en_color = val["en"]
             found_raw_color = key
             break
 
+    # Очистка типа товара
     cn_type = re.sub(r'[а-яА-ЯёЁ\s]', '', str(info.get("cn_type", "")))
     en_type = re.sub(r'[а-яА-ЯёЁ\s]', '', str(info.get("en_type", "")))
     
+    # Склейка цвета и товара
     cn = (found_cn_color + cn_type) if found_cn_color else cn_type
     en = (found_en_color + en_type) if found_en_color else en_type
     size = re.sub(r'\s', '', str(info.get("size", "")))
     
+    # Проверка артикула на цифры
     ai_art = str(info.get("article", "")).strip()
     reg_art = str(regex_article).strip()
     
@@ -146,10 +153,12 @@ def process_product_data(info: dict, regex_article: str, barcode: str, raw_text:
     
     full_article = ai_art if len(ai_art) > len(reg_art) else reg_art
     
+    # Добавление цвета в артикул (для отчета)
     display_color = info.get("color", "").strip() or found_raw_color
     if display_color and display_color.lower() not in STOP_WORDS and display_color.lower() not in full_article.lower():
         full_article = f"{full_article} {display_color}".strip()
         
+    # Чистка имени файла (безопасный формат)
     clean_article_for_filename = re.sub(r'[\\/*?:"<>|\s]', '', full_article)
     
     parts = []
@@ -162,17 +171,22 @@ def process_product_data(info: dict, regex_article: str, barcode: str, raw_text:
     
     def clean_val(k):
         val = str(info.get(k, "")).strip()
+        # Защита от HTML тегов
+        val = val.replace('<', '&lt;').replace('>', '&gt;')
         return val if val and val.lower() not in STOP_WORDS else "➖"
 
+    # Безопасный HTML формат для Telegram (чтобы не падало от звездочек в размерах)
+    disp_color_safe = display_color.replace('<', '&lt;').replace('>', '&gt;') if display_color and display_color.lower() not in STOP_WORDS else '➖'
+    
     details = (
-        f"📝 **Детали с этикетки:**\n"
-        f"🔸 **Товар:** {clean_val('ru_type')}\n"
-        f"🔸 **Цвет:** {display_color if display_color and display_color.lower() not in STOP_WORDS else '➖'}\n"
-        f"🔸 **Размер:** {clean_val('size')}\n"
-        f"🔸 **Материал:** {clean_val('material')}\n"
-        f"🔸 **Комплект:** {clean_val('complectation')}\n"
-        f"🔸 **Свойства:** {clean_val('characteristics')}\n"
-        f"🔸 **Дата:** {clean_val('date')}"
+        f"📝 <b>Детали с этикетки:</b>\n"
+        f"🔸 <b>Товар:</b> {clean_val('ru_type')}\n"
+        f"🔸 <b>Цвет:</b> {disp_color_safe}\n"
+        f"🔸 <b>Размер:</b> {clean_val('size')}\n"
+        f"🔸 <b>Материал:</b> {clean_val('material')}\n"
+        f"🔸 <b>Комплект:</b> {clean_val('complectation')}\n"
+        f"🔸 <b>Свойства:</b> {clean_val('characteristics')}\n"
+        f"🔸 <b>Дата:</b> {clean_val('date')}"
     )
     
     return new_name, full_article, details
@@ -203,14 +217,19 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         vector_pdf.name = new_name 
         
         barcode_status = f"{barcode} (Читается + EAN-13 верен)" if is_valid_ean13(barcode) else f"{barcode if barcode else '❌ Не найден'}"
-        wb_link_art = final_art.replace(' ', '')
-        article_text = f"{final_art} 👉 [Посмотреть на WB](https://www.wildberries.ru/catalog/{wb_link_art}/detail.aspx)" if final_art else "❌ Не найден (или нет цифр)"
         
-        status = f"✅ **Штрих-код:** {barcode_status}\n✅ **Артикул:** {article_text}\n\n{details_text}\n\n📄 `{new_name}`"
+        if final_art:
+            wb_link_art = final_art.replace(' ', '')
+            article_text = f"{final_art} 👉 <a href='https://www.wildberries.ru/catalog/{wb_link_art}/detail.aspx'>Посмотреть на WB</a>"
+        else:
+            article_text = "❌ Не найден (или нет цифр)"
         
-        await update.message.reply_document(document=InputFile(vector_pdf, filename=new_name), caption=status, parse_mode='Markdown')
+        status = f"✅ <b>Штрих-код:</b> {barcode_status}\n✅ <b>Артикул:</b> {article_text}\n\n{details_text}\n\n📄 <code>{new_name}</code>"
+        
+        await update.message.reply_document(document=InputFile(vector_pdf, filename=new_name), caption=status, parse_mode='HTML')
         await msg.delete()
     except Exception as e:
+        logger.error(f"Error in handle_photo: {e}")
         await msg.edit_text(f"❌ Ошибка: {e}")
 
 async def handle_doc(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -221,7 +240,6 @@ async def handle_doc(update: Update, context: ContextTypes.DEFAULT_TYPE):
         pdf_bytes = await file.download_as_bytearray()
         reader = PdfReader(BytesIO(pdf_bytes))
         
-        # Увеличил DPI до 200, чтобы ИИ и сканер лучше видели мелкий текст (типа "blue")
         images = convert_from_bytes(bytes(pdf_bytes), dpi=200)
         
         groups = {}
@@ -240,7 +258,6 @@ async def handle_doc(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if key in groups:
                 groups[key]['pages'].append(i)
             else:
-                # ВОТ ОНА МАГИЯ: Даем нейросети глаза для PDF-файлов!
                 img_buffer = BytesIO()
                 img.save(img_buffer, format='JPEG')
                 img_b64 = base64.b64encode(img_buffer.getvalue()).decode('utf-8')
@@ -256,14 +273,19 @@ async def handle_doc(update: Update, context: ContextTypes.DEFAULT_TYPE):
             out.name = g['fname'] 
             
             bc_stat = f"{g['bc']} (EAN-13 верен)" if is_valid_ean13(g['bc']) else f"{g['bc'] if g['bc'] else '❌'}"
-            art_clean = g['art'].replace(' ', '')
-            art_text = f"{g['art']} 👉 [Посмотреть на WB](https://www.wildberries.ru/catalog/{art_clean}/detail.aspx)" if g['art'] else "❌"
             
-            cap = f"📦 **Страниц:** {len(g['pages'])}\n✅ **Штрих-код:** {bc_stat}\n✅ **Артикул:** {art_text}\n\n{g['details']}\n\n📄 `{g['fname']}`"
-            await update.message.reply_document(document=InputFile(out, filename=g['fname']), caption=cap, parse_mode='Markdown')
+            if g['art']:
+                art_clean = g['art'].replace(' ', '')
+                art_text = f"{g['art']} 👉 <a href='https://www.wildberries.ru/catalog/{art_clean}/detail.aspx'>Посмотреть на WB</a>"
+            else:
+                art_text = "❌"
+            
+            cap = f"📦 <b>Страниц:</b> {len(g['pages'])}\n✅ <b>Штрих-код:</b> {bc_stat}\n✅ <b>Артикул:</b> {art_text}\n\n{g['details']}\n\n📄 <code>{g['fname']}</code>"
+            await update.message.reply_document(document=InputFile(out, filename=g['fname']), caption=cap, parse_mode='HTML')
         
         await status_msg.delete()
     except Exception as e:
+        logger.error(f"Error in handle_doc: {e}")
         await status_msg.edit_text(f"❌ Ошибка PDF: {e}")
 
 async def handle_paste(update: Update, context: ContextTypes.DEFAULT_TYPE):
