@@ -29,7 +29,6 @@ logger = logging.getLogger(__name__)
 TELEGRAM_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
 KIMI_API_KEY = os.getenv('KIMI_API_KEY')
 
-# Встроенный словарь цветов для надежности (ИИ переводит только тип товара)
 COLORS_DICT = {
     "blue": {"cn": "蓝色", "en": "Blue"}, "синий": {"cn": "蓝色", "en": "Blue"}, "синяя": {"cn": "蓝色", "en": "Blue"},
     "голубой": {"cn": "浅蓝色", "en": "LightBlue"},
@@ -92,7 +91,7 @@ async def ask_kimi(prompt: str, image_b64: str = None, system_msg: str = "") -> 
 async def get_product_info(text: str, image_b64: str = None) -> dict:
     system_msg = (
         "Ты — следователь-аналитик этикеток. Внимательно сканируй текст и извлекай факты. Если явно не написано, ищи по смыслу.\n"
-        "ПРАВИЛО АРТИКУЛА: Артикул ОБЯЗАТЕЛЬНО должен содержать цифры! Если после слова Артикул идут только буквы — игнорируй это, это не артикул. Если цифры есть — забирай строку ЦЕЛИКОМ со всеми приписками.\n"
+        "ПРАВИЛО АРТИКУЛА: Артикул ОБЯЗАТЕЛЬНО должен содержать цифры! Если после слова Артикул идут только буквы — игнорируй это. Если цифры есть — забирай строку ЦЕЛИКОМ со всеми приписками и цветами.\n"
         "Верни ТОЛЬКО валидный JSON:\n"
         "{\n"
         '  "ru_type": "Что это за товар на русском (например: Набор аксессуаров, Расческа)",\n'
@@ -114,7 +113,6 @@ async def get_product_info(text: str, image_b64: str = None) -> dict:
         clean_res = re.sub(r'```json|```', '', res_text).strip()
         info = json.loads(clean_res)
         
-        # Страховка для типа товара
         t_low = text.lower()
         if not info.get("cn_type") or info.get("cn_type").lower() in STOP_WORDS:
             if any(x in t_low for x in ["расческа", "梳", "tangle", "brush"]): info["cn_type"] = "梳子"
@@ -124,8 +122,6 @@ async def get_product_info(text: str, image_b64: str = None) -> dict:
         return {}
 
 def process_product_data(info: dict, regex_article: str, barcode: str, raw_text: str):
-    """Собирает имя файла и красивое сообщение для чата"""
-    # 1. Поиск цвета кодом (для перевода)
     found_cn_color, found_en_color, found_raw_color = "", "", ""
     text_lower = raw_text.lower()
     for key, val in COLORS_DICT.items():
@@ -135,33 +131,27 @@ def process_product_data(info: dict, regex_article: str, barcode: str, raw_text:
             found_raw_color = key
             break
 
-    # 2. Вычищаем базу типа товара (удаляем русский)
     cn_type = re.sub(r'[а-яА-ЯёЁ\s]', '', str(info.get("cn_type", "")))
     en_type = re.sub(r'[а-яА-ЯёЁ\s]', '', str(info.get("en_type", "")))
     
-    # 3. Склеиваем переводы
     cn = (found_cn_color + cn_type) if found_cn_color else cn_type
     en = (found_en_color + en_type) if found_en_color else en_type
     size = re.sub(r'\s', '', str(info.get("size", "")))
     
-    # 4. Обработка Артикула (Проверка на наличие цифр)
     ai_art = str(info.get("article", "")).strip()
     reg_art = str(regex_article).strip()
     
-    # Жесткое правило: Артикул должен содержать цифры
     if not re.search(r'\d', ai_art): ai_art = ""
     if not re.search(r'\d', reg_art): reg_art = ""
     
     full_article = ai_art if len(ai_art) > len(reg_art) else reg_art
     
-    # Добавляем найденный цвет к артикулу, если его там нет
     display_color = info.get("color", "").strip() or found_raw_color
     if display_color and display_color.lower() not in STOP_WORDS and display_color.lower() not in full_article.lower():
         full_article = f"{full_article} {display_color}".strip()
         
     clean_article_for_filename = re.sub(r'[\\/*?:"<>|\s]', '', full_article)
     
-    # 5. Сборка имени файла
     parts = []
     for p in [cn, en, size, clean_article_for_filename, barcode]:
         if p and str(p).lower() not in STOP_WORDS:
@@ -170,7 +160,6 @@ def process_product_data(info: dict, regex_article: str, barcode: str, raw_text:
     if not parts: parts = ["Product"]
     new_name = "_".join(parts) + ".pdf"
     
-    # 6. Сборка красивого отчета для Telegram
     def clean_val(k):
         val = str(info.get(k, "")).strip()
         return val if val and val.lower() not in STOP_WORDS else "➖"
@@ -226,12 +215,14 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def handle_doc(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message.document.file_name.lower().endswith('.pdf'): return
-    status_msg = await update.message.reply_text("⏳ Умная сортировка PDF...")
+    status_msg = await update.message.reply_text("⏳ Умная сортировка PDF (Глубокий анализ)...")
     try:
         file = await context.bot.get_file(update.message.document.file_id)
         pdf_bytes = await file.download_as_bytearray()
         reader = PdfReader(BytesIO(pdf_bytes))
-        images = convert_from_bytes(bytes(pdf_bytes), dpi=150)
+        
+        # Увеличил DPI до 200, чтобы ИИ и сканер лучше видели мелкий текст (типа "blue")
+        images = convert_from_bytes(bytes(pdf_bytes), dpi=200)
         
         groups = {}
         for i, img in enumerate(images):
@@ -249,7 +240,12 @@ async def handle_doc(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if key in groups:
                 groups[key]['pages'].append(i)
             else:
-                info = await get_product_info(txt)
+                # ВОТ ОНА МАГИЯ: Даем нейросети глаза для PDF-файлов!
+                img_buffer = BytesIO()
+                img.save(img_buffer, format='JPEG')
+                img_b64 = base64.b64encode(img_buffer.getvalue()).decode('utf-8')
+                
+                info = await get_product_info(txt, image_b64=img_b64)
                 fname, f_art, details = process_product_data(info, reg_art, bc, txt)
                 groups[key] = {'pages': [i], 'fname': fname, 'art': f_art, 'bc': bc, 'details': details}
 
