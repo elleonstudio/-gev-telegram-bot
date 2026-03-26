@@ -127,7 +127,6 @@ def process_product_data(info: dict, regex_article: str, barcode: str, raw_text:
     color_from_ai = str(info.get("color", "")).strip().lower()
     text_lower = raw_text.lower()
     
-    # Поиск цвета в словаре (надежный метод)
     for key, val in COLORS_DICT.items():
         if key in color_from_ai or re.search(r'\b' + key + r'\b', text_lower):
             found_cn_color = val["cn"]
@@ -135,16 +134,13 @@ def process_product_data(info: dict, regex_article: str, barcode: str, raw_text:
             found_raw_color = key
             break
 
-    # Очистка типа товара
     cn_type = re.sub(r'[а-яА-ЯёЁ\s]', '', str(info.get("cn_type", "")))
     en_type = re.sub(r'[а-яА-ЯёЁ\s]', '', str(info.get("en_type", "")))
     
-    # Склейка цвета и товара
     cn = (found_cn_color + cn_type) if found_cn_color else cn_type
     en = (found_en_color + en_type) if found_en_color else en_type
     size = re.sub(r'\s', '', str(info.get("size", "")))
     
-    # Проверка артикула на цифры
     ai_art = str(info.get("article", "")).strip()
     reg_art = str(regex_article).strip()
     
@@ -153,12 +149,10 @@ def process_product_data(info: dict, regex_article: str, barcode: str, raw_text:
     
     full_article = ai_art if len(ai_art) > len(reg_art) else reg_art
     
-    # Добавление цвета в артикул (для отчета)
     display_color = info.get("color", "").strip() or found_raw_color
     if display_color and display_color.lower() not in STOP_WORDS and display_color.lower() not in full_article.lower():
         full_article = f"{full_article} {display_color}".strip()
         
-    # Чистка имени файла (безопасный формат)
     clean_article_for_filename = re.sub(r'[\\/*?:"<>|\s]', '', full_article)
     
     parts = []
@@ -171,11 +165,9 @@ def process_product_data(info: dict, regex_article: str, barcode: str, raw_text:
     
     def clean_val(k):
         val = str(info.get(k, "")).strip()
-        # Защита от HTML тегов
         val = val.replace('<', '&lt;').replace('>', '&gt;')
         return val if val and val.lower() not in STOP_WORDS else "➖"
 
-    # Безопасный HTML формат для Telegram (чтобы не падало от звездочек в размерах)
     disp_color_safe = display_color.replace('<', '&lt;').replace('>', '&gt;') if display_color and display_color.lower() not in STOP_WORDS else '➖'
     
     details = (
@@ -198,9 +190,25 @@ def find_article_regex(text: str) -> str:
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = await update.message.reply_text('⏳ Обрабатываю фото (Глубокий анализ)...')
     try:
+        caption = update.message.caption or ""
         file = await context.bot.get_file(update.message.photo[-1].file_id)
         buf = BytesIO(); await file.download_to_memory(buf)
         img_b64 = base64.b64encode(buf.getvalue()).decode('utf-8')
+
+        # ВОТ ОНИ! ВЕРНУЛ НА МЕСТО ФУНКЦИИ /1688 и /HS
+        if caption.lower().strip().startswith('/1688'):
+            res = await ask_kimi("Supplier Info CN/EN. Code blocks.", image_b64=img_b64, system_msg="1688 Expert.")
+            await msg.delete()
+            return await update.message.reply_text(res, parse_mode='Markdown')
+
+        if caption.lower().strip().startswith('/hs'):
+            res = await ask_kimi(f"Подбери коды ТН ВЭД (HS Code) для товара: {caption}", image_b64=img_b64, system_msg="Ты таможенный брокер. Выдай коды ТН ВЭД.")
+            codes = re.findall(r'\b\d{4,10}\b', res)
+            final_msg = f"📦 *Коды ТН ВЭД:*\n\n{res}\n\n🔍 *Проверить в базе Alta:*\n"
+            for code in set(codes): final_msg += f"👉 [Код {code}](https://www.alta.ru/tnved/code/{code}/)\n"
+            await msg.delete()
+            return await update.message.reply_text(final_msg, parse_mode='Markdown', disable_web_page_preview=True)
+
         img_obj = Image.open(BytesIO(buf.getvalue()))
 
         barcode = ""
