@@ -29,7 +29,6 @@ logger = logging.getLogger(__name__)
 TELEGRAM_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
 KIMI_API_KEY = os.getenv('KIMI_API_KEY')
 
-# Встроенный словарь цветов для 100% точности
 COLORS_DICT = {
     "blue": {"cn": "蓝色", "en": "Blue"}, "синий": {"cn": "蓝色", "en": "Blue"}, "синяя": {"cn": "蓝色", "en": "Blue"},
     "голубой": {"cn": "浅蓝色", "en": "LightBlue"}, "голубая": {"cn": "浅蓝色", "en": "LightBlue"},
@@ -188,27 +187,48 @@ def find_article_regex(text: str) -> str:
     return match.group(1).strip() if match else ""
 
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    msg = await update.message.reply_text('⏳ Обрабатываю фото (Глубокий анализ)...')
+    msg = await update.message.reply_text('⏳ Обрабатываю запрос...')
     try:
         caption = update.message.caption or ""
         file = await context.bot.get_file(update.message.photo[-1].file_id)
         buf = BytesIO(); await file.download_to_memory(buf)
         img_b64 = base64.b64encode(buf.getvalue()).decode('utf-8')
 
-        # ВОТ ОНИ! ВЕРНУЛ НА МЕСТО ФУНКЦИИ /1688 и /HS
+        # БЛОК 1688
         if caption.lower().strip().startswith('/1688'):
-            res = await ask_kimi("Supplier Info CN/EN. Code blocks.", image_b64=img_b64, system_msg="1688 Expert.")
+            sys_msg = "Ты эксперт по закупкам на 1688. Отвечай СТРОГО на РУССКОМ языке."
+            res = await ask_kimi("Вытащи информацию о поставщике и товаре с картинки (названия, цены, характеристики).", image_b64=img_b64, system_msg=sys_msg)
+            res_safe = res.replace('<', '&lt;').replace('>', '&gt;')
             await msg.delete()
-            return await update.message.reply_text(res, parse_mode='Markdown')
+            return await update.message.reply_text(f"🇨🇳 <b>Анализ 1688:</b>\n\n{res_safe}", parse_mode='HTML')
 
+        # БЛОК HS (ТН ВЭД) - ЖЕСТКИЙ ПРИКАЗ ДЛЯ ИИ
         if caption.lower().strip().startswith('/hs'):
-            res = await ask_kimi(f"Подбери коды ТН ВЭД (HS Code) для товара: {caption}", image_b64=img_b64, system_msg="Ты таможенный брокер. Выдай коды ТН ВЭД.")
-            codes = re.findall(r'\b\d{4,10}\b', res)
-            final_msg = f"📦 *Коды ТН ВЭД:*\n\n{res}\n\n🔍 *Проверить в базе Alta:*\n"
-            for code in set(codes): final_msg += f"👉 [Код {code}](https://www.alta.ru/tnved/code/{code}/)\n"
-            await msg.delete()
-            return await update.message.reply_text(final_msg, parse_mode='Markdown', disable_web_page_preview=True)
+            sys_msg = (
+                "Ты таможенный декларант РФ. Отвечай СТРОГО НА РУССКОМ ЯЗЫКЕ!\n"
+                "Твоя задача — подобрать 2-3 точных 10-значных кода ТН ВЭД ЕАЭС для товара на фото.\n"
+                "ОБЯЗАТЕЛЬНО: Каждый код пиши СЛИТНО (ровно 10 цифр, без точек и пробелов, например: 6106100000).\n"
+                "Дай краткое пояснение к каждому коду."
+            )
+            item_name = caption[3:].strip()
+            prompt_text = f"Определи 10-значные коды ТН ВЭД для: {item_name}" if item_name else "Определи 10-значные коды ТН ВЭД для товара на фото."
+            
+            res = await ask_kimi(prompt_text, image_b64=img_b64, system_msg=sys_msg)
+            res_safe = res.replace('<', '&lt;').replace('>', '&gt;')
+            
+            codes = re.findall(r'\b\d{10}\b', res)
+            final_msg = f"📦 <b>Коды ТН ВЭД:</b>\n\n{res_safe}\n\n🔍 <b>Проверить в базе Alta:</b>\n"
+            
+            if codes:
+                for code in set(codes): 
+                    final_msg += f"👉 <a href='https://www.alta.ru/tnved/code/{code}/'>Код {code}</a>\n"
+            else:
+                final_msg += "<i>Точные 10-значные коды не обнаружены в ответе.</i>\n"
 
+            await msg.delete()
+            return await update.message.reply_text(final_msg, parse_mode='HTML', disable_web_page_preview=True)
+
+        # ОСНОВНОЙ БЛОК: Обработка этикетки
         img_obj = Image.open(BytesIO(buf.getvalue()))
 
         barcode = ""
