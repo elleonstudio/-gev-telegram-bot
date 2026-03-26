@@ -13,26 +13,23 @@ from PIL import Image
 import pytesseract
 from pyzbar.pyzbar import decode
 
-# Библиотеки для создания векторной этикетки из фото
+# Библиотеки для создания векторной этикетки
 from reportlab.pdfgen import canvas
 from reportlab.lib.units import mm
 from reportlab.graphics.barcode import createBarcodeDrawing
 
-# Библиотеки для работы с оригинальным качеством PDF
+# Библиотеки для работы с PDF
 try:
     from PyPDF2 import PdfReader, PdfWriter
     HAS_PYPDF = True
 except ImportError:
     HAS_PYPDF = False
 
-# Настройка логирования
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 TELEGRAM_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
 KIMI_API_KEY = os.getenv('KIMI_API_KEY')
-
-# --- ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ---
 
 def is_valid_ean13(barcode: str) -> bool:
     if not barcode or len(barcode) != 13 or not barcode.isdigit(): return False
@@ -41,7 +38,6 @@ def is_valid_ean13(barcode: str) -> bool:
     return checksum == (10 - ((sum(digits[1::2]) * 3 + sum(digits[0::2])) % 10)) % 10
 
 def generate_vector_label_60x40(barcode_num, article):
-    """Создает идеальный PDF 60x40мм для термопринтера"""
     buf = BytesIO()
     c = canvas.Canvas(buf, pagesize=(60*mm, 40*mm))
     if barcode_num:
@@ -56,7 +52,7 @@ def generate_vector_label_60x40(barcode_num, article):
             c.drawString(5*mm, 20*mm, f"BC: {barcode_num}")
     if article:
         c.setFont("Helvetica-Bold", 10)
-        c.drawString(7*mm, 6*mm, f"Art: {article[:30]}")
+        c.drawString(7*mm, 6*mm, f"Art: {article[:35]}")
     c.showPage()
     c.save()
     buf.seek(0)
@@ -77,26 +73,25 @@ async def ask_kimi(prompt: str, image_b64: str = None, system_msg: str = "") -> 
             return "{}"
 
 async def get_product_info(text: str, image_b64: str = None) -> dict:
-    """Заставляет ИИ переводить и искать артикул"""
     system_msg = (
-        "Ты — профессиональный переводчик и парсер. Твоя задача: понять, что за товар на этикетке.\n"
-        "ДАЖЕ ЕСЛИ НА ЭТИКЕТКЕ НЕТ ИЕРОГЛИФОВ, ТЫ ОБЯЗАН ПЕРЕВЕСТИ ТИП ТОВАРА НА КИТАЙСКИЙ.\n"
-        "Верни ТОЛЬКО чистый JSON без разметки:\n"
+        "Ты — парсер этикеток. Извлеки данные.\n"
+        "ДАЖЕ ЕСЛИ ТЕКСТ ТОЛЬКО НА РУССКОМ ИЛИ АНГЛИЙСКОМ, ТЫ ОБЯЗАН ПЕРЕВЕСТИ СУТЬ ТОВАРА НА КИТАЙСКИЙ.\n"
+        "ВНИМАНИЕ: Артикул может состоять из нескольких строк (например, название + цвет blue). Собери его полностью!\n"
+        "Верни ТОЛЬКО чистый JSON:\n"
         "{\n"
         '  "cn_name": "Китайский перевод (например: 梳子)",\n'
-        '  "en_name": "Английский перевод без пробелов (например: Hairbrush)",\n'
+        '  "en_name": "Английский перевод без пробелов",\n'
         '  "size": "Размер (если есть)",\n'
-        '  "article": "Артикул полностью (буквы и цифры)"\n'
+        '  "article": "Артикул полностью со всеми приписками и цветами"\n'
         "}\n"
-        "ЗАПРЕЩЕНО использовать кириллицу (русские буквы) в полях cn_name и en_name!"
+        "ЗАПРЕЩЕНО использовать русские буквы в cn_name и en_name!"
     )
-    prompt = f"Распознай и переведи. Текст: {text[:800]}"
+    prompt = f"Текст: {text[:800]}"
     res_text = await ask_kimi(prompt, image_b64=image_b64, system_msg=system_msg)
     try:
         clean_res = re.sub(r'```json|```', '', res_text).strip()
         info = json.loads(clean_res)
         
-        # Страховка для популярных товаров
         t_low = text.lower()
         if not info.get("cn_name") or info.get("cn_name").lower() in ['none', 'null']:
             if any(x in t_low for x in ["расческа", "梳", "tangle", "brush"]): info["cn_name"] = "梳子"
@@ -106,29 +101,31 @@ async def get_product_info(text: str, image_b64: str = None) -> dict:
         return {"cn_name": "商品", "en_name": "Product", "size": "", "article": ""}
 
 def build_filename(info: dict, regex_article: str, barcode: str) -> tuple:
-    """Собирает имя файла, вычищая мусор"""
-    # Удаляем русские буквы и лишние слова
-    cn = re.sub(r'[а-яА-ЯёЁ\s]', '', info.get("cn_name", ""))
-    en = re.sub(r'[а-яА-ЯёЁ\s]', '', info.get("en_name", ""))
-    size = info.get("size", "").strip()
+    cn = re.sub(r'[а-яА-ЯёЁ\s]', '', str(info.get("cn_name", "")))
+    en = re.sub(r'[а-яА-ЯёЁ\s]', '', str(info.get("en_name", "")))
+    size = re.sub(r'\s', '', str(info.get("size", "")))
     
-    # Приоритет артикула (код -> ИИ)
-    art = regex_article if regex_article else info.get("article", "")
-    art = re.sub(r'[\\/*?:"<>|]', '', art).strip()
+    # ПРИОРИТЕТ У ИИ: берем самую длинную версию артикула, чтобы не потерять цвет (blue)
+    ai_art = str(info.get("article", "")).strip()
+    reg_art = str(regex_article).strip()
+    full_article = ai_art if len(ai_art) > len(reg_art) else reg_art
+    
+    # Удаляем ВСЕ пробелы и запрещенные символы из артикула для имени файла
+    clean_article_for_filename = re.sub(r'[\\/*?:"<>|\s]', '', full_article)
     
     parts = []
-    for p in [cn, en, size, art, barcode]:
-        if p and p.lower() not in ['none', 'null', 'безразмера', '无']:
+    for p in [cn, en, size, clean_article_for_filename, barcode]:
+        if p and str(p).lower() not in ['none', 'null', 'безразмера', '无']:
             parts.append(str(p))
+            
+    if not parts: parts = ["Product"]
+    new_name = "_".join(parts) + ".pdf"
     
-    if not parts: parts = ["Label"]
-    return "_".join(parts) + ".pdf", art
+    return new_name, full_article
 
 def find_article_regex(text: str) -> str:
     match = re.search(r'(?:Артикул|Article|Арт\.?)\s*[:\-\.]?\s*([^\n\r]+)', text, re.IGNORECASE)
     return match.group(1).strip() if match else ""
-
-# --- ОБРАБОТЧИКИ ---
 
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = await update.message.reply_text('⏳ Обрабатываю фото...')
@@ -138,7 +135,6 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         img_b64 = base64.b64encode(buf.getvalue()).decode('utf-8')
         img_obj = Image.open(BytesIO(buf.getvalue()))
 
-        # 1. Распознаем данные
         barcode = ""
         codes = decode(img_obj.convert('L'))
         if codes: barcode = codes[0].data.decode('utf-8')
@@ -146,12 +142,11 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         raw_text = pytesseract.image_to_string(img_obj, lang='rus+eng+chi_sim')
         regex_art = find_article_regex(raw_text)
         
-        # 2. ИИ перевод и уточнение
         info = await get_product_info(raw_text, image_b64=img_b64)
         new_name, final_art = build_filename(info, regex_art, barcode)
         
-        # 3. Генерация 60x40
         vector_pdf = generate_vector_label_60x40(barcode, final_art)
+        vector_pdf.name = new_name # ЖЕСТКО ЗАДАЕМ ИМЯ ДЛЯ ТЕЛЕГРАМА
         
         status = f"✅ Штрих-код: {barcode if barcode else '❌'}\n✅ Артикул: {final_art if final_art else '❌'}\n📄 `{new_name}`"
         await update.message.reply_document(document=InputFile(vector_pdf, filename=new_name), caption=status, parse_mode='Markdown')
@@ -192,6 +187,7 @@ async def handle_doc(update: Update, context: ContextTypes.DEFAULT_TYPE):
             writer = PdfWriter()
             for p in g['pages']: writer.add_page(reader.pages[p])
             out = BytesIO(); writer.write(out); out.seek(0)
+            out.name = g['fname'] # ЖЕСТКО ЗАДАЕМ ИМЯ ДЛЯ ТЕЛЕГРАМА
             
             cap = f"📦 Страниц: {len(g['pages'])}\n✅ Штрих-код: {g['bc']}\n✅ Артикул: {g['art']}\n📄 `{g['fname']}`"
             await update.message.reply_document(document=InputFile(out, filename=g['fname']), caption=cap, parse_mode='Markdown')
