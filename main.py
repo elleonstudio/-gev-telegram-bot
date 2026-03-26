@@ -29,49 +29,24 @@ logger = logging.getLogger(__name__)
 TELEGRAM_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
 KIMI_API_KEY = os.getenv('KIMI_API_KEY')
 
-# ЖЕСТКИЙ СЛОВАРЬ ЦВЕТОВ (ИИ сюда не лезет)
+# Встроенный словарь цветов для надежности (ИИ переводит только тип товара)
 COLORS_DICT = {
-    "blue": {"cn": "蓝色", "en": "Blue"},
-    "синий": {"cn": "蓝色", "en": "Blue"},
-    "синяя": {"cn": "蓝色", "en": "Blue"},
+    "blue": {"cn": "蓝色", "en": "Blue"}, "синий": {"cn": "蓝色", "en": "Blue"}, "синяя": {"cn": "蓝色", "en": "Blue"},
     "голубой": {"cn": "浅蓝色", "en": "LightBlue"},
-    "голубая": {"cn": "浅蓝色", "en": "LightBlue"},
-    "black": {"cn": "黑色", "en": "Black"},
-    "черный": {"cn": "黑色", "en": "Black"},
-    "чёрный": {"cn": "黑色", "en": "Black"},
-    "черная": {"cn": "黑色", "en": "Black"},
-    "white": {"cn": "白色", "en": "White"},
-    "белый": {"cn": "白色", "en": "White"},
-    "белая": {"cn": "白色", "en": "White"},
-    "red": {"cn": "红色", "en": "Red"},
-    "красный": {"cn": "红色", "en": "Red"},
-    "красная": {"cn": "红色", "en": "Red"},
-    "pink": {"cn": "粉色", "en": "Pink"},
-    "розовый": {"cn": "粉色", "en": "Pink"},
-    "розовая": {"cn": "粉色", "en": "Pink"},
-    "green": {"cn": "绿色", "en": "Green"},
-    "зеленый": {"cn": "绿色", "en": "Green"},
-    "зеленая": {"cn": "绿色", "en": "Green"},
-    "yellow": {"cn": "黄色", "en": "Yellow"},
-    "желтый": {"cn": "黄色", "en": "Yellow"},
-    "желтая": {"cn": "黄色", "en": "Yellow"},
-    "beige": {"cn": "米色", "en": "Beige"},
-    "бежевый": {"cn": "米色", "en": "Beige"},
-    "бежевая": {"cn": "米色", "en": "Beige"},
-    "purple": {"cn": "紫色", "en": "Purple"},
-    "фиолетовый": {"cn": "紫色", "en": "Purple"},
-    "фиолетовая": {"cn": "紫色", "en": "Purple"},
-    "grey": {"cn": "灰色", "en": "Grey"},
-    "gray": {"cn": "灰色", "en": "Grey"},
-    "серый": {"cn": "灰色", "en": "Grey"},
-    "серая": {"cn": "灰色", "en": "Grey"},
-    "brown": {"cn": "棕色", "en": "Brown"},
-    "коричневый": {"cn": "棕色", "en": "Brown"},
-    "коричневая": {"cn": "棕色", "en": "Brown"},
-    "orange": {"cn": "橙色", "en": "Orange"},
-    "оранжевый": {"cn": "橙色", "en": "Orange"},
-    "оранжевая": {"cn": "橙色", "en": "Orange"}
+    "black": {"cn": "黑色", "en": "Black"}, "черный": {"cn": "黑色", "en": "Black"}, "чёрный": {"cn": "黑色", "en": "Black"},
+    "white": {"cn": "白色", "en": "White"}, "белый": {"cn": "白色", "en": "White"}, "белая": {"cn": "白色", "en": "White"},
+    "red": {"cn": "红色", "en": "Red"}, "красный": {"cn": "红色", "en": "Red"}, "красная": {"cn": "红色", "en": "Red"},
+    "pink": {"cn": "粉色", "en": "Pink"}, "розовый": {"cn": "粉色", "en": "Pink"}, "розовая": {"cn": "粉色", "en": "Pink"},
+    "green": {"cn": "绿色", "en": "Green"}, "зеленый": {"cn": "绿色", "en": "Green"}, "зеленая": {"cn": "绿色", "en": "Green"},
+    "yellow": {"cn": "黄色", "en": "Yellow"}, "желтый": {"cn": "黄色", "en": "Yellow"},
+    "beige": {"cn": "米色", "en": "Beige"}, "бежевый": {"cn": "米色", "en": "Beige"}, "бежевая": {"cn": "米色", "en": "Beige"},
+    "purple": {"cn": "紫色", "en": "Purple"}, "фиолетовый": {"cn": "紫色", "en": "Purple"},
+    "grey": {"cn": "灰色", "en": "Grey"}, "gray": {"cn": "灰色", "en": "Grey"}, "серый": {"cn": "灰色", "en": "Grey"},
+    "brown": {"cn": "棕色", "en": "Brown"}, "коричневый": {"cn": "棕色", "en": "Brown"},
+    "orange": {"cn": "橙色", "en": "Orange"}, "оранжевый": {"cn": "橙色", "en": "Orange"}
 }
+
+STOP_WORDS = ['none', 'null', 'нет', 'не указан', 'не указано', 'отсутствует', '无', '']
 
 def is_valid_ean13(barcode: str) -> bool:
     if not barcode or len(barcode) != 13 or not barcode.isdigit(): return False
@@ -116,15 +91,22 @@ async def ask_kimi(prompt: str, image_b64: str = None, system_msg: str = "") -> 
 
 async def get_product_info(text: str, image_b64: str = None) -> dict:
     system_msg = (
-        "Ты — парсер этикеток. Переведи ТОЛЬКО тип товара (например, расческа, сковорода).\n"
-        "Цвет переводить НЕ НУЖНО, это сделает код.\n"
-        "Верни ТОЛЬКО чистый JSON:\n"
+        "Ты — следователь-аналитик этикеток. Внимательно сканируй текст и извлекай факты. Если явно не написано, ищи по смыслу.\n"
+        "ПРАВИЛО АРТИКУЛА: Артикул ОБЯЗАТЕЛЬНО должен содержать цифры! Если после слова Артикул идут только буквы — игнорируй это, это не артикул. Если цифры есть — забирай строку ЦЕЛИКОМ со всеми приписками.\n"
+        "Верни ТОЛЬКО валидный JSON:\n"
         "{\n"
-        '  "cn_name": "Китайский перевод типа товара (например: 梳子)",\n'
-        '  "en_name": "Английский перевод типа товара (например: Hairbrush)",\n'
-        '  "size": "Размер (если есть)",\n'
-        '  "article": "Артикул без цвета"\n'
+        '  "ru_type": "Что это за товар на русском (например: Набор аксессуаров, Расческа)",\n'
+        '  "cn_type": "Перевод типа товара на китайский (например: 梳子)",\n'
+        '  "en_type": "Перевод типа товара на англ без пробелов (например: Hairbrush)",\n'
+        '  "color": "Цвет (ищи слова вроде blue, бежевый, черный)",\n'
+        '  "size": "Размер (ищи цифры с см, ml, х, *)",\n'
+        '  "article": "Артикул целиком (ТОЛЬКО ЕСЛИ ЕСТЬ ЦИФРЫ!)",\n'
+        '  "material": "Материал (например: пластик, чугун)",\n'
+        '  "complectation": "Комплектация (например: 1 расческа, 2 заколки)",\n'
+        '  "characteristics": "Свойства (например: для всех типов волос)",\n'
+        '  "date": "Дата (форматы дат, год)"\n'
         "}\n"
+        "Если данных нет, оставляй строку пустой: \"\""
     )
     prompt = f"Текст: {text[:800]}"
     res_text = await ask_kimi(prompt, image_b64=image_b64, system_msg=system_msg)
@@ -132,19 +114,20 @@ async def get_product_info(text: str, image_b64: str = None) -> dict:
         clean_res = re.sub(r'```json|```', '', res_text).strip()
         info = json.loads(clean_res)
         
+        # Страховка для типа товара
         t_low = text.lower()
-        if not info.get("cn_name") or info.get("cn_name").lower() in ['none', 'null', '']:
-            if any(x in t_low for x in ["расческа", "梳", "tangle", "brush"]): info["cn_name"] = "梳子"
-            elif any(x in t_low for x in ["маска", "mask", "面"]): info["cn_name"] = "面膜"
+        if not info.get("cn_type") or info.get("cn_type").lower() in STOP_WORDS:
+            if any(x in t_low for x in ["расческа", "梳", "tangle", "brush"]): info["cn_type"] = "梳子"
+            elif any(x in t_low for x in ["маска", "mask", "面"]): info["cn_type"] = "面膜"
         return info
     except:
-        return {"cn_name": "商品", "en_name": "Product", "size": "", "article": ""}
+        return {}
 
-def build_filename(info: dict, regex_article: str, barcode: str, raw_text: str) -> tuple:
-    # 1. КОД САМ ИЩЕТ ЦВЕТ В ТЕКСТЕ
+def process_product_data(info: dict, regex_article: str, barcode: str, raw_text: str):
+    """Собирает имя файла и красивое сообщение для чата"""
+    # 1. Поиск цвета кодом (для перевода)
     found_cn_color, found_en_color, found_raw_color = "", "", ""
     text_lower = raw_text.lower()
-    
     for key, val in COLORS_DICT.items():
         if re.search(r'\b' + key + r'\b', text_lower):
             found_cn_color = val["cn"]
@@ -152,42 +135,65 @@ def build_filename(info: dict, regex_article: str, barcode: str, raw_text: str) 
             found_raw_color = key
             break
 
-    # 2. Вычищаем базу (тип товара)
-    cn_type = re.sub(r'[а-яА-ЯёЁ\s]', '', str(info.get("cn_name", "")).replace('None', '').replace('null', ''))
-    en_type = re.sub(r'[а-яА-ЯёЁ\s]', '', str(info.get("en_name", "")).replace('None', '').replace('null', ''))
+    # 2. Вычищаем базу типа товара (удаляем русский)
+    cn_type = re.sub(r'[а-яА-ЯёЁ\s]', '', str(info.get("cn_type", "")))
+    en_type = re.sub(r'[а-яА-ЯёЁ\s]', '', str(info.get("en_type", "")))
     
-    # 3. Склеиваем: Цвет (от кода) + Тип товара (от ИИ)
+    # 3. Склеиваем переводы
     cn = (found_cn_color + cn_type) if found_cn_color else cn_type
     en = (found_en_color + en_type) if found_en_color else en_type
+    size = re.sub(r'\s', '', str(info.get("size", "")))
     
-    size = re.sub(r'\s', '', str(info.get("size", "")).replace('None', '').replace('null', ''))
-    
+    # 4. Обработка Артикула (Проверка на наличие цифр)
     ai_art = str(info.get("article", "")).strip()
     reg_art = str(regex_article).strip()
+    
+    # Жесткое правило: Артикул должен содержать цифры
+    if not re.search(r'\d', ai_art): ai_art = ""
+    if not re.search(r'\d', reg_art): reg_art = ""
+    
     full_article = ai_art if len(ai_art) > len(reg_art) else reg_art
     
-    # Добавляем оригинальный цвет в артикул (для отчета и имени файла)
-    if found_raw_color and found_raw_color not in full_article.lower():
-        full_article = f"{full_article} {found_raw_color}"
+    # Добавляем найденный цвет к артикулу, если его там нет
+    display_color = info.get("color", "").strip() or found_raw_color
+    if display_color and display_color.lower() not in STOP_WORDS and display_color.lower() not in full_article.lower():
+        full_article = f"{full_article} {display_color}".strip()
         
     clean_article_for_filename = re.sub(r'[\\/*?:"<>|\s]', '', full_article)
     
+    # 5. Сборка имени файла
     parts = []
     for p in [cn, en, size, clean_article_for_filename, barcode]:
-        if p and str(p).lower() not in ['none', 'null', 'безразмера', '无', 'нет', '']:
+        if p and str(p).lower() not in STOP_WORDS:
             parts.append(str(p))
             
     if not parts: parts = ["Product"]
     new_name = "_".join(parts) + ".pdf"
     
-    return new_name, full_article
+    # 6. Сборка красивого отчета для Telegram
+    def clean_val(k):
+        val = str(info.get(k, "")).strip()
+        return val if val and val.lower() not in STOP_WORDS else "➖"
+
+    details = (
+        f"📝 **Детали с этикетки:**\n"
+        f"🔸 **Товар:** {clean_val('ru_type')}\n"
+        f"🔸 **Цвет:** {display_color if display_color and display_color.lower() not in STOP_WORDS else '➖'}\n"
+        f"🔸 **Размер:** {clean_val('size')}\n"
+        f"🔸 **Материал:** {clean_val('material')}\n"
+        f"🔸 **Комплект:** {clean_val('complectation')}\n"
+        f"🔸 **Свойства:** {clean_val('characteristics')}\n"
+        f"🔸 **Дата:** {clean_val('date')}"
+    )
+    
+    return new_name, full_article, details
 
 def find_article_regex(text: str) -> str:
     match = re.search(r'(?:Артикул|Article|Арт\.?)\s*[:\-\.]?\s*([^\n\r]+)', text, re.IGNORECASE)
     return match.group(1).strip() if match else ""
 
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    msg = await update.message.reply_text('⏳ Обрабатываю фото...')
+    msg = await update.message.reply_text('⏳ Обрабатываю фото (Глубокий анализ)...')
     try:
         file = await context.bot.get_file(update.message.photo[-1].file_id)
         buf = BytesIO(); await file.download_to_memory(buf)
@@ -202,16 +208,17 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         regex_art = find_article_regex(raw_text)
         
         info = await get_product_info(raw_text, image_b64=img_b64)
-        new_name, final_art = build_filename(info, regex_art, barcode, raw_text)
+        new_name, final_art, details_text = process_product_data(info, regex_art, barcode, raw_text)
         
         vector_pdf = generate_vector_label_60x40(barcode, final_art)
         vector_pdf.name = new_name 
         
-        barcode_status = f"{barcode} (Читается + формат EAN-13 верен)" if is_valid_ean13(barcode) else f"{barcode if barcode else '❌ Не найден'}"
+        barcode_status = f"{barcode} (Читается + EAN-13 верен)" if is_valid_ean13(barcode) else f"{barcode if barcode else '❌ Не найден'}"
         wb_link_art = final_art.replace(' ', '')
-        article_text = f"{final_art} 👉 [Посмотреть на WB](https://www.wildberries.ru/catalog/{wb_link_art}/detail.aspx)" if final_art else "❌ Не найден"
+        article_text = f"{final_art} 👉 [Посмотреть на WB](https://www.wildberries.ru/catalog/{wb_link_art}/detail.aspx)" if final_art else "❌ Не найден (или нет цифр)"
         
-        status = f"✅ Штрих-код: {barcode_status}\n✅ Артикул: {article_text}\n📄 `{new_name}`"
+        status = f"✅ **Штрих-код:** {barcode_status}\n✅ **Артикул:** {article_text}\n\n{details_text}\n\n📄 `{new_name}`"
+        
         await update.message.reply_document(document=InputFile(vector_pdf, filename=new_name), caption=status, parse_mode='Markdown')
         await msg.delete()
     except Exception as e:
@@ -243,8 +250,8 @@ async def handle_doc(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 groups[key]['pages'].append(i)
             else:
                 info = await get_product_info(txt)
-                fname, f_art = build_filename(info, reg_art, bc, txt)
-                groups[key] = {'pages': [i], 'fname': fname, 'art': f_art, 'bc': bc}
+                fname, f_art, details = process_product_data(info, reg_art, bc, txt)
+                groups[key] = {'pages': [i], 'fname': fname, 'art': f_art, 'bc': bc, 'details': details}
 
         for k, g in groups.items():
             writer = PdfWriter()
@@ -252,11 +259,11 @@ async def handle_doc(update: Update, context: ContextTypes.DEFAULT_TYPE):
             out = BytesIO(); writer.write(out); out.seek(0)
             out.name = g['fname'] 
             
-            bc_stat = f"{g['bc']} (Читается + формат EAN-13 верен)" if is_valid_ean13(g['bc']) else f"{g['bc'] if g['bc'] else '❌'}"
+            bc_stat = f"{g['bc']} (EAN-13 верен)" if is_valid_ean13(g['bc']) else f"{g['bc'] if g['bc'] else '❌'}"
             art_clean = g['art'].replace(' ', '')
             art_text = f"{g['art']} 👉 [Посмотреть на WB](https://www.wildberries.ru/catalog/{art_clean}/detail.aspx)" if g['art'] else "❌"
             
-            cap = f"📦 Страниц: {len(g['pages'])}\n✅ Штрих-код: {bc_stat}\n✅ Артикул: {art_text}\n📄 `{g['fname']}`"
+            cap = f"📦 **Страниц:** {len(g['pages'])}\n✅ **Штрих-код:** {bc_stat}\n✅ **Артикул:** {art_text}\n\n{g['details']}\n\n📄 `{g['fname']}`"
             await update.message.reply_document(document=InputFile(out, filename=g['fname']), caption=cap, parse_mode='Markdown')
         
         await status_msg.delete()
@@ -271,7 +278,7 @@ async def handle_paste(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 def main():
     app = Application.builder().token(TELEGRAM_TOKEN).build()
-    app.add_handler(CommandHandler("start", lambda u,c: u.message.reply_text("🤖 Бот запущен!")))
+    app.add_handler(CommandHandler("start", lambda u,c: u.message.reply_text("🤖 Бот запущен (Режим Аналитика)!")))
     app.add_handler(MessageHandler(filters.Regex(r'^/paste'), handle_paste))
     app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
     app.add_handler(MessageHandler(filters.Document.PDF, handle_doc))
