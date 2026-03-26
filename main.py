@@ -52,7 +52,8 @@ def generate_vector_label_60x40(barcode_num, article):
             c.drawString(5*mm, 20*mm, f"BC: {barcode_num}")
     if article:
         c.setFont("Helvetica-Bold", 10)
-        c.drawString(7*mm, 6*mm, f"Art: {article[:35]}")
+        # Увеличил лимит символов для отображения на этикетке, чтобы цвет точно влез
+        c.drawString(7*mm, 6*mm, f"Art: {article[:40]}")
     c.showPage()
     c.save()
     buf.seek(0)
@@ -76,13 +77,13 @@ async def get_product_info(text: str, image_b64: str = None) -> dict:
     system_msg = (
         "Ты — парсер этикеток. Извлеки данные.\n"
         "ДАЖЕ ЕСЛИ ТЕКСТ ТОЛЬКО НА РУССКОМ ИЛИ АНГЛИЙСКОМ, ТЫ ОБЯЗАН ПЕРЕВЕСТИ СУТЬ ТОВАРА НА КИТАЙСКИЙ.\n"
-        "ВНИМАНИЕ: Артикул может состоять из нескольких строк (например, название + цвет blue). Собери его полностью!\n"
         "Верни ТОЛЬКО чистый JSON:\n"
         "{\n"
         '  "cn_name": "Китайский перевод (например: 梳子)",\n'
         '  "en_name": "Английский перевод без пробелов",\n'
         '  "size": "Размер (если есть)",\n'
-        '  "article": "Артикул полностью со всеми приписками и цветами"\n'
+        '  "article": "Основной артикул",\n'
+        '  "color": "Цвет товара (например: blue, black, розовый). ИЩИ ЕГО ВНИМАТЕЛЬНО, он может быть перенесен на новую строку!"\n'
         "}\n"
         "ЗАПРЕЩЕНО использовать русские буквы в cn_name и en_name!"
     )
@@ -93,34 +94,43 @@ async def get_product_info(text: str, image_b64: str = None) -> dict:
         info = json.loads(clean_res)
         
         t_low = text.lower()
-        if not info.get("cn_name") or info.get("cn_name").lower() in ['none', 'null']:
+        if not info.get("cn_name") or info.get("cn_name").lower() in ['none', 'null', '']:
             if any(x in t_low for x in ["расческа", "梳", "tangle", "brush"]): info["cn_name"] = "梳子"
             elif any(x in t_low for x in ["маска", "mask", "面"]): info["cn_name"] = "面膜"
         return info
     except:
-        return {"cn_name": "商品", "en_name": "Product", "size": "", "article": ""}
+        return {"cn_name": "商品", "en_name": "Product", "size": "", "article": "", "color": ""}
 
 def build_filename(info: dict, regex_article: str, barcode: str) -> tuple:
     cn = re.sub(r'[а-яА-ЯёЁ\s]', '', str(info.get("cn_name", "")))
     en = re.sub(r'[а-яА-ЯёЁ\s]', '', str(info.get("en_name", "")))
     size = re.sub(r'\s', '', str(info.get("size", "")))
     
-    # ПРИОРИТЕТ У ИИ: берем самую длинную версию артикула, чтобы не потерять цвет (blue)
+    # 1. Достаем артикул и цвет от ИИ
     ai_art = str(info.get("article", "")).strip()
+    color = str(info.get("color", "")).strip()
+    
+    # 2. Склеиваем артикул и цвет, если цвет найден
+    if color and color.lower() not in ['none', 'null', '无', 'нет', '']:
+        if color.lower() not in ai_art.lower():
+            ai_art = f"{ai_art} {color}"
+            
+    # 3. Сравниваем с регуляркой (на всякий случай)
     reg_art = str(regex_article).strip()
     full_article = ai_art if len(ai_art) > len(reg_art) else reg_art
     
-    # Удаляем ВСЕ пробелы и запрещенные символы из артикула для имени файла
+    # 4. Вычищаем ВСЕ пробелы для имени файла
     clean_article_for_filename = re.sub(r'[\\/*?:"<>|\s]', '', full_article)
     
     parts = []
     for p in [cn, en, size, clean_article_for_filename, barcode]:
-        if p and str(p).lower() not in ['none', 'null', 'безразмера', '无']:
+        if p and str(p).lower() not in ['none', 'null', 'безразмера', '无', 'нет', '']:
             parts.append(str(p))
             
     if not parts: parts = ["Product"]
     new_name = "_".join(parts) + ".pdf"
     
+    # Возвращаем имя файла и полный артикул с пробелами (для текста в чате)
     return new_name, full_article
 
 def find_article_regex(text: str) -> str:
@@ -146,9 +156,13 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         new_name, final_art = build_filename(info, regex_art, barcode)
         
         vector_pdf = generate_vector_label_60x40(barcode, final_art)
-        vector_pdf.name = new_name # ЖЕСТКО ЗАДАЕМ ИМЯ ДЛЯ ТЕЛЕГРАМА
+        vector_pdf.name = new_name 
         
-        status = f"✅ Штрих-код: {barcode if barcode else '❌'}\n✅ Артикул: {final_art if final_art else '❌'}\n📄 `{new_name}`"
+        barcode_status = f"{barcode} (Читается + формат EAN-13 верен)" if is_valid_ean13(barcode) else f"{barcode if barcode else '❌ Не найден'}"
+        wb_link_art = final_art.replace(' ', '')
+        article_text = f"{final_art} 👉 [Посмотреть на WB](https://www.wildberries.ru/catalog/{wb_link_art}/detail.aspx)" if final_art else "❌ Не найден"
+        
+        status = f"✅ Штрих-код: {barcode_status}\n✅ Артикул: {article_text}\n📄 `{new_name}`"
         await update.message.reply_document(document=InputFile(vector_pdf, filename=new_name), caption=status, parse_mode='Markdown')
         await msg.delete()
     except Exception as e:
@@ -187,9 +201,13 @@ async def handle_doc(update: Update, context: ContextTypes.DEFAULT_TYPE):
             writer = PdfWriter()
             for p in g['pages']: writer.add_page(reader.pages[p])
             out = BytesIO(); writer.write(out); out.seek(0)
-            out.name = g['fname'] # ЖЕСТКО ЗАДАЕМ ИМЯ ДЛЯ ТЕЛЕГРАМА
+            out.name = g['fname'] 
             
-            cap = f"📦 Страниц: {len(g['pages'])}\n✅ Штрих-код: {g['bc']}\n✅ Артикул: {g['art']}\n📄 `{g['fname']}`"
+            bc_stat = f"{g['bc']} (Читается + формат EAN-13 верен)" if is_valid_ean13(g['bc']) else f"{g['bc'] if g['bc'] else '❌'}"
+            art_clean = g['art'].replace(' ', '')
+            art_text = f"{g['art']} 👉 [Посмотреть на WB](https://www.wildberries.ru/catalog/{art_clean}/detail.aspx)" if g['art'] else "❌"
+            
+            cap = f"📦 Страниц: {len(g['pages'])}\n✅ Штрих-код: {bc_stat}\n✅ Артикул: {art_text}\n📄 `{g['fname']}`"
             await update.message.reply_document(document=InputFile(out, filename=g['fname']), caption=cap, parse_mode='Markdown')
         
         await status_msg.delete()
