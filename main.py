@@ -136,11 +136,10 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
             codes = re.findall(r'\b\d{4,10}\b', res)
             final_msg = f"📦 Коды:\n\n{res}\n\n🔍 База:\n"
             for code in set(codes): final_msg += f"👉 [Код {code}](https://www.alta.ru/tnved/code/{code}/)\n"
-            return await update.message.reply_text(final_msg, parse_mode='Markdown', disable_web_page_preview=True)
+            return await update.message.reply_text(final_msg, parse_mode='Markdown')
 
         msg = await update.message.reply_text('⏳ Читаю картинку и генерирую векторный PDF 60x40...')
         
-        # Чтение штрих-кода с фото
         img_obj = Image.open(BytesIO(buf.getvalue()))
         barcode, text, article = "", "", ""
         codes = decode(img_obj.convert('L'))
@@ -158,7 +157,6 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         new_name = await ask_kimi(f"File naming. Text: {text}", image_b64=img_b64, system_msg=SYSTEM_MSG_NAMING)
         new_name = re.sub(r'[\\/*?:"<>|]', '', new_name.strip()).replace('.pdf', '') + ".pdf"
         
-        # Генерируем вектор 60x40
         vector_pdf = generate_vector_label_60x40(barcode, article)
         
         barcode_status = "❌ Не найден"
@@ -169,7 +167,8 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
             
         final_text = f"✅ Штрих-код: {barcode_status}\n✅ Артикул: {article_text}\n✨ Сгенерирована векторная этикетка (60x40мм)\n📄 `{new_name}`"
         
-        await update.message.reply_document(document=InputFile(vector_pdf, filename=new_name), caption=final_text, parse_mode='Markdown', disable_web_page_preview=True)
+        # Убрал параметр disable_web_page_preview, который вызывал ошибку
+        await update.message.reply_document(document=InputFile(vector_pdf, filename=new_name), caption=final_text, parse_mode='Markdown')
         await msg.delete()
         
     except Exception as e:
@@ -191,25 +190,21 @@ async def handle_doc(update: Update, context: ContextTypes.DEFAULT_TYPE):
         pdf_bytes = await file.download_as_bytearray()
         
         reader = PdfReader(BytesIO(pdf_bytes))
-        images = convert_from_bytes(bytes(pdf_bytes), dpi=150) # 150 достаточно для быстрого поиска штрих-кода
+        images = convert_from_bytes(bytes(pdf_bytes), dpi=150)
         
-        # Группируем страницы по уникальным товарам
-        products = {} # key: barcode_or_article, value: {'pages': [], 'text': '', 'barcode': '', 'article': ''}
+        products = {}
         
         for i, img in enumerate(images):
-            # Сначала пытаемся быстро найти штрих-код (без долгого распознавания текста)
             barcode = ""
             codes = decode(img.convert('L'))
             if codes: barcode = codes[0].data.decode('utf-8')
             
             key = barcode
             
-            # Если такой товар уже есть, просто добавляем страницу и идем дальше (УСКОРЯЕТ ПРОЦЕСС В 10 РАЗ)
             if key and key in products:
                 products[key]['pages'].append(i)
                 continue
                 
-            # Если штрих-кода нет или это новый товар, запускаем распознавание текста
             text, article = "", ""
             try:
                 text = pytesseract.image_to_string(img, lang='rus+eng+chi_sim', config=r'--oem 3 --psm 6')
@@ -241,11 +236,9 @@ async def handle_doc(update: Update, context: ContextTypes.DEFAULT_TYPE):
             article = data['article']
             text_for_name = data['text'] if data['text'] else "Unknown Product"
 
-            # Генерируем английское имя для группы
             new_name = await ask_kimi(f"Сгенерируй имя по тексту: {text_for_name[:500]}", system_msg=SYSTEM_MSG_NAMING)
             clean_name = re.sub(r'[\\/*?:"<>|]', '', new_name.strip()).replace('.pdf', '') + ".pdf"
             
-            # Собираем все страницы этого товара из оригинального PDF
             writer = PdfWriter()
             for p_idx in data['pages']:
                 writer.add_page(reader.pages[p_idx])
@@ -262,11 +255,10 @@ async def handle_doc(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
             caption_text = f"📦 СТРАНИЦ В ФАЙЛЕ: {len(data['pages'])}\n✅ Штрих-код: {barcode_status}\n✅ Артикул: {article_text}\n📄 `{clean_name}`"
             
-            await update.message.reply_document(document=InputFile(pdf_out, filename=clean_name), caption=caption_text, parse_mode='Markdown', disable_web_page_preview=True)
+            # Убрал параметр disable_web_page_preview, который вызывал ошибку
+            await update.message.reply_document(document=InputFile(pdf_out, filename=clean_name), caption=caption_text, parse_mode='Markdown')
             files_summary.append(f"📄 `{clean_name}` ({len(data['pages'])} стр.)")
 
-        # Итоговое сообщение (опционально)
-        # await update.message.reply_text(f"🎉 Сортировка завершена! Разделено на {len(files_summary)} файлов.")
         await status_msg.delete()
 
     except Exception as e:
