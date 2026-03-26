@@ -12,7 +12,13 @@ from pdf2image import convert_from_bytes
 from PIL import Image
 import pytesseract
 from pyzbar.pyzbar import decode
-from pyairtable import Api
+
+# ЖЕСТКАЯ ПРОВЕРКА PyPDF2
+try:
+    from PyPDF2 import PdfReader, PdfWriter
+    HAS_PYPDF = True
+except ImportError:
+    HAS_PYPDF = False
 
 # Настройка логирования
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
@@ -20,11 +26,8 @@ logger = logging.getLogger(__name__)
 
 TELEGRAM_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
 KIMI_API_KEY = os.getenv('KIMI_API_KEY')
-AIRTABLE_TOKEN = "pati6TFqzPlZaI08o.88a1e98775f215fb08b58c2fde28b38acebc5f4556c8eb850b9ca9930dbcf607"
-AIRTABLE_BASE_ID = "appRIlSL63Kxh6iWX"
-AIRTABLE_TABLE_NAME = "Закупка"
 
-# ЖЕСТКАЯ инструкция для правильного названия файла
+# Инструкция для ИИ (чтобы не забывал про английский)
 SYSTEM_MSG_NAMING = (
     "Ты эксперт по неймингу файлов. Твоя задача — создать имя файла по тексту с этикетки.\n"
     "ОБЯЗАТЕЛЬНО переведи название товара на английский язык!\n"
@@ -67,47 +70,6 @@ async def extract_data_from_image(image: Image.Image):
     if match: article = match.group(1)
     return barcode_num, text, article
 
-def parse_airtable_export(text: str) -> dict:
-    parsed = {}
-    match = re.search(r'AIRTABLE_EXPORT_START(.*?)AIRTABLE_EXPORT_END', text, re.DOTALL)
-    if match:
-        for line in match.group(1).strip().split('\n'):
-            if ':' in line:
-                key, val = line.split(':', 1)
-                parsed[key.strip()] = val.strip()
-    invoice_body = text.split('AIRTABLE_EXPORT_START')[0].strip()
-    items = [l.strip() for l in invoice_body.split('\n') if l.strip().startswith(('•', '-'))]
-    parsed["Invoice_Body"] = "\n".join(items) if items else invoice_body
-    return parsed
-
-async def send_to_airtable(parsed_data: dict):
-    try:
-        api = Api(AIRTABLE_TOKEN)
-        table = api.table(AIRTABLE_BASE_ID, AIRTABLE_TABLE_NAME)
-        raw_date = parsed_data.get("Date", "")
-        formatted_date = datetime.now().strftime("%Y-%m-%d")
-        if "." in raw_date:
-            d, m, y = raw_date.split(".")
-            formatted_date = f"{y}-{m}-{d}"
-        invoice = parsed_data.get("Invoice_ID", "")
-        client_name = ""
-        match = re.match(r'^([a-zA-Z]+)-?(\d+)', invoice)
-        if match: client_name = f"{match.group(1).capitalize()}-{match.group(2)}"
-        record = {
-            "Код Карго": invoice, "Дата": formatted_date,
-            "Сумма (¥)": float(parsed_data.get("Sum_Client_CNY", 0)),
-            "Реал Цена Закупки (¥)": float(parsed_data.get("Real_Purchase_CNY", 0)),
-            "Курс Клиент": float(parsed_data.get("Client_Rate", 0)),
-            "Курс Реал": float(parsed_data.get("Real_Rate", 0)),
-            "Расход материалов (¥)": float(parsed_data.get("China_Logistics_CNY", 0)),
-            "Кол-во коробок": int(parsed_data.get("FF_Boxes_Qty", 0)),
-            "Заказ": parsed_data.get("Invoice_Body", ""), "Карго Статус": "Заказано"
-        }
-        if client_name: record["Клиент"] = client_name 
-        table.create(record, typecast=True)
-        return True, client_name
-    except Exception: return False, "Error"
-
 async def handle_paste(update: Update, context: ContextTypes.DEFAULT_TYPE):
     raw_text = update.message.text
     if not raw_text: return
@@ -133,21 +95,10 @@ async def handle_paste(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text
     if not text: return
-    
     if text.strip().startswith('/calc'): return
-    
     if text.startswith('/paste'):
         await handle_paste(update, context)
         return
-        
-    if "AIRTABLE_EXPORT_START" in text:
-        msg = await update.message.reply_text("📥 Записываю в базу...")
-        parsed_data = parse_airtable_export(text)
-        success, info = await send_to_airtable(parsed_data)
-        if success: await msg.edit_text(f"✅ В базе!")
-        else: await msg.edit_text(f"❌ Ошибка.")
-        return
-
     resp = await ask_kimi(text)
     await update.message.reply_text(resp[:4000])
 
@@ -188,18 +139,20 @@ async def handle_doc(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not doc.file_name.lower().endswith('.pdf'): return
         
         status_msg = await update.message.reply_text("⏳ Анализирую PDF и проверяю штрих-коды...")
+        
+        # ЖЕСТКИЙ БЛОК: Если PyPDF2 не установлен, бот отказывается портить качество.
+        if not HAS_PYPDF:
+            await status_msg.edit_text("❌ ОШИБКА СЕРВЕРА: Библиотека PyPDF2 не загрузилась!\nПожалуйста, убедись, что она есть в requirements.txt и ПЕРЕЗАПУСТИ проект в Railway (сделай Deploy). Без нее качество будет низким, поэтому я остановил процесс.")
+            return
+
         file = await context.bot.get_file(doc.file_id)
         pdf_bytes = await file.download_as_bytearray()
         
-        try:
-            from PyPDF2 import PdfReader, PdfWriter
-            use_pypdf = True
-            reader = PdfReader(BytesIO(pdf_bytes))
-        except ImportError:
-            use_pypdf = False
+        # Загружаем ОРИГИНАЛЬНЫЙ PDF для вырезания страниц
+        reader = PdfReader(BytesIO(pdf_bytes))
 
-        # Конвертируем в картинки только для "чтения" текста нейросетью
-        images = convert_from_bytes(bytes(pdf_bytes), dpi=150)
+        # Изображения нужны ТОЛЬКО для того, чтобы нейросеть прочитала штрихкод (dpi=200 для точности)
+        images = convert_from_bytes(bytes(pdf_bytes), dpi=200)
         seen_barcodes = {} 
         
         for i, img in enumerate(images):
@@ -213,8 +166,7 @@ async def handle_doc(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     'page_index': i,
                     'filename': clean_name,
                     'barcode': barcode,
-                    'article': article,
-                    'img': img
+                    'article': article
                 }
 
         files_summary = []
@@ -223,31 +175,23 @@ async def handle_doc(update: Update, context: ContextTypes.DEFAULT_TYPE):
             barcode = data['barcode']
             article = data['article']
 
-            # Оценка штрих-кода
             barcode_status = "❌ Не найден"
             if barcode:
                 barcode_status = f"{barcode} (Читается + EAN-13 верен)" if is_valid_ean13(barcode) else f"{barcode} (Читается, но ошибка формата!)"
 
-            # СОЗДАНИЕ ИДЕАЛЬНОГО PDF (БЕЗ ПОТЕРИ КАЧЕСТВА)
+            # ✂️ ВЫРЕЗАЕМ СТРАНИЦУ ИЗ ОРИГИНАЛЬНОГО PDF (100% КАЧЕСТВО БЕЗ СЖАТИЯ)
+            writer = PdfWriter()
+            writer.add_page(reader.pages[data['page_index']])
+            
             pdf_out = BytesIO()
-            if use_pypdf:
-                writer = PdfWriter()
-                writer.add_page(reader.pages[data['page_index']])
-                writer.write(pdf_out)
-            else:
-                data['img'].convert('RGB').save(pdf_out, format='PDF', resolution=300)
-
+            writer.write(pdf_out)
             pdf_out.seek(0)
+            
             await update.message.reply_document(document=InputFile(pdf_out, filename=fname))
 
             files_summary.append(f"📄 `{fname}`\n✅ Штрих-код: {barcode_status}\n✅ Артикул: {article if article else 'Не найден'}")
 
-        # Финальный отчет
         summary_text = f"✅ **Анализ PDF завершен!**\nНайдено уникальных товаров: {len(seen_barcodes)}\n\n" + "\n\n---\n\n".join(files_summary)
-        
-        if not use_pypdf:
-            summary_text += "\n\n⚠️ *Качество картинок снижено. Добавь PyPDF2 в requirements.txt для оригинального качества.*"
-
         await status_msg.edit_text(summary_text, parse_mode='Markdown')
 
     except Exception as e:
