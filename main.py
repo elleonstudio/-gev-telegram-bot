@@ -27,7 +27,7 @@ logger = logging.getLogger(__name__)
 TELEGRAM_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
 KIMI_API_KEY = os.getenv('KIMI_API_KEY')
 
-# Инструкция для ИИ (чтобы не забывал про английский)
+# Инструкция для ИИ
 SYSTEM_MSG_NAMING = (
     "Ты эксперт по неймингу файлов. Твоя задача — создать имя файла по тексту с этикетки.\n"
     "ОБЯЗАТЕЛЬНО переведи название товара на английский язык!\n"
@@ -66,8 +66,14 @@ async def extract_data_from_image(image: Image.Image):
     try:
         text = pytesseract.image_to_string(image, lang='rus+eng+chi_sim', config=r'--oem 3 --psm 6')
     except: pass
-    match = re.search(r'Артикул[:\s]*(\d+)', text, re.IGNORECASE)
-    if match: article = match.group(1)
+    
+    # Улучшенный поиск артикула
+    for pattern in [r'Артикул[:\s]*(\d+)', r'Артикул.*?(\d{5,})', r'Article[:\s]*(\d+)']:
+        match = re.search(pattern, text, re.IGNORECASE)
+        if match: 
+            article = match.group(1)
+            break
+            
     return barcode_num, text, article
 
 async def handle_paste(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -128,9 +134,13 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         barcode_status = "❌ Не найден"
         if barcode:
-            barcode_status = f"{barcode} (Читается + EAN-13 верен)" if is_valid_ean13(barcode) else f"{barcode} (ОШИБКА ФОРМАТА!)"
+            barcode_status = f"{barcode} (Читается + формат EAN-13 верен)" if is_valid_ean13(barcode) else f"{barcode} (ОШИБКА ФОРМАТА!)"
             
-        await msg.edit_text(f"📄 `{new_name}`\n✅ Штрих-код: {barcode_status}\n✅ Артикул: {article if article else 'Не найден'}", parse_mode='Markdown')
+        # Формируем красивый текст для артикула с WB ссылкой
+        article_text = f"{article} 👉 [Посмотреть на WB](https://www.wildberries.ru/catalog/{article}/detail.aspx)" if article else "Не найден"
+            
+        final_text = f"✅ Штрих-код: {barcode_status}\n✅ Артикул: {article_text}\n📄 `{new_name}`"
+        await msg.edit_text(final_text, parse_mode='Markdown', disable_web_page_preview=True)
     except Exception: pass
 
 async def handle_doc(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -140,7 +150,6 @@ async def handle_doc(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         status_msg = await update.message.reply_text("⏳ Анализирую PDF и проверяю штрих-коды...")
         
-        # ЖЕСТКИЙ БЛОК: Если PyPDF2 не установлен, бот отказывается портить качество.
         if not HAS_PYPDF:
             await status_msg.edit_text("❌ ОШИБКА СЕРВЕРА: Библиотека PyPDF2 не загрузилась!\nПожалуйста, убедись, что она есть в requirements.txt и ПЕРЕЗАПУСТИ проект в Railway (сделай Deploy). Без нее качество будет низким, поэтому я остановил процесс.")
             return
@@ -148,10 +157,7 @@ async def handle_doc(update: Update, context: ContextTypes.DEFAULT_TYPE):
         file = await context.bot.get_file(doc.file_id)
         pdf_bytes = await file.download_as_bytearray()
         
-        # Загружаем ОРИГИНАЛЬНЫЙ PDF для вырезания страниц
         reader = PdfReader(BytesIO(pdf_bytes))
-
-        # Изображения нужны ТОЛЬКО для того, чтобы нейросеть прочитала штрихкод (dpi=200 для точности)
         images = convert_from_bytes(bytes(pdf_bytes), dpi=200)
         seen_barcodes = {} 
         
@@ -177,9 +183,11 @@ async def handle_doc(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
             barcode_status = "❌ Не найден"
             if barcode:
-                barcode_status = f"{barcode} (Читается + EAN-13 верен)" if is_valid_ean13(barcode) else f"{barcode} (Читается, но ошибка формата!)"
+                barcode_status = f"{barcode} (Читается + формат EAN-13 верен)" if is_valid_ean13(barcode) else f"{barcode} (Читается, но ошибка формата!)"
 
-            # ✂️ ВЫРЕЗАЕМ СТРАНИЦУ ИЗ ОРИГИНАЛЬНОГО PDF (100% КАЧЕСТВО БЕЗ СЖАТИЯ)
+            article_text = f"{article} 👉 [Посмотреть на WB](https://www.wildberries.ru/catalog/{article}/detail.aspx)" if article else "Не найден"
+
+            # Вырезаем оригинальную страницу
             writer = PdfWriter()
             writer.add_page(reader.pages[data['page_index']])
             
@@ -189,10 +197,12 @@ async def handle_doc(update: Update, context: ContextTypes.DEFAULT_TYPE):
             
             await update.message.reply_document(document=InputFile(pdf_out, filename=fname))
 
-            files_summary.append(f"📄 `{fname}`\n✅ Штрих-код: {barcode_status}\n✅ Артикул: {article if article else 'Не найден'}")
+            files_summary.append(f"✅ Штрих-код: {barcode_status}\n✅ Артикул: {article_text}\n📄 `{fname}`")
 
         summary_text = f"✅ **Анализ PDF завершен!**\nНайдено уникальных товаров: {len(seen_barcodes)}\n\n" + "\n\n---\n\n".join(files_summary)
-        await status_msg.edit_text(summary_text, parse_mode='Markdown')
+        
+        # Отправляем сообщение без предпросмотра ссылок, чтобы не засорять чат картинками с WB
+        await status_msg.edit_text(summary_text, parse_mode='Markdown', disable_web_page_preview=True)
 
     except Exception as e:
         logger.error(f"Error: {e}")
