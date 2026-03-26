@@ -13,12 +13,10 @@ from PIL import Image
 import pytesseract
 from pyzbar.pyzbar import decode
 
-# Библиотеки для создания векторной этикетки
 from reportlab.pdfgen import canvas
 from reportlab.lib.units import mm
 from reportlab.graphics.barcode import createBarcodeDrawing
 
-# Библиотеки для работы с PDF
 try:
     from PyPDF2 import PdfReader, PdfWriter
     HAS_PYPDF = True
@@ -74,18 +72,18 @@ async def ask_kimi(prompt: str, image_b64: str = None, system_msg: str = "") -> 
 
 async def get_product_info(text: str, image_b64: str = None) -> dict:
     system_msg = (
-        "Ты — парсер этикеток. Извлеки данные.\n"
-        "ДАЖЕ ЕСЛИ ТЕКСТ ТОЛЬКО НА РУССКОМ ИЛИ АНГЛИЙСКОМ, ТЫ ОБЯЗАН ПЕРЕВЕСТИ СУТЬ ТОВАРА НА КИТАЙСКИЙ И АНГЛИЙСКИЙ.\n"
-        "ВНИМАНИЕ: Если у товара есть ЦВЕТ (например, blue), ОБЯЗАТЕЛЬНО переведи его и добавь в cn_name и en_name!\n"
-        "Верни ТОЛЬКО чистый JSON:\n"
+        "Ты — строгий парсер текста с этикеток.\n"
+        "ГЛАВНОЕ ПРАВИЛО: Ищи цвет ТОЛЬКО в тексте! НЕ угадывай по картинке.\n"
+        "ПЕРЕВОДИ СТРОГО ПО ОТДЕЛЬНЫМ ЯЧЕЙКАМ. Верни ТОЛЬКО чистый JSON:\n"
         "{\n"
-        '  "cn_name": "Китайский перевод: ЦВЕТ + ТИП ТОВАРА (например: 蓝色梳子)",\n'
-        '  "en_name": "Английский перевод: ЦВЕТ + ТИП ТОВАРА без пробелов (например: BlueHairbrush)",\n'
+        '  "cn_type": "Китайский перевод типа товара (например: 梳子)",\n'
+        '  "cn_color": "Китайский перевод ЦВЕТА (например: 蓝色). Если цвета нет - пустота",\n'
+        '  "en_type": "Английский перевод типа товара (например: Hairbrush)",\n'
+        '  "en_color": "Английский перевод ЦВЕТА (например: Blue). Если цвета нет - пустота",\n'
         '  "size": "Размер (если есть)",\n'
         '  "article": "Основной артикул",\n'
-        '  "color": "Цвет товара точно как на этикетке (например: blue, розовый). ИЩИ ЕГО ВНИМАТЕЛЬНО, он может быть на новой строке!"\n'
+        '  "raw_color": "Цвет товара СТРОГО ИЗ ТЕКСТА на оригинальном языке (например: blue, розовый)"\n'
         "}\n"
-        "ЗАПРЕЩЕНО использовать русские буквы в cn_name и en_name!"
     )
     prompt = f"Текст: {text[:800]}"
     res_text = await ask_kimi(prompt, image_b64=image_b64, system_msg=system_msg)
@@ -94,24 +92,34 @@ async def get_product_info(text: str, image_b64: str = None) -> dict:
         info = json.loads(clean_res)
         
         t_low = text.lower()
-        if not info.get("cn_name") or info.get("cn_name").lower() in ['none', 'null', '']:
-            if any(x in t_low for x in ["расческа", "梳", "tangle", "brush"]): info["cn_name"] = "梳子"
-            elif any(x in t_low for x in ["маска", "mask", "面"]): info["cn_name"] = "面膜"
+        if not info.get("cn_type") or info.get("cn_type").lower() in ['none', 'null', '']:
+            if any(x in t_low for x in ["расческа", "梳", "tangle", "brush"]): info["cn_type"] = "梳子"
+            elif any(x in t_low for x in ["маска", "mask", "面"]): info["cn_type"] = "面膜"
         return info
     except:
-        return {"cn_name": "商品", "en_name": "Product", "size": "", "article": "", "color": ""}
+        return {"cn_type": "商品", "cn_color": "", "en_type": "Product", "en_color": "", "size": "", "article": "", "raw_color": ""}
 
 def build_filename(info: dict, regex_article: str, barcode: str) -> tuple:
-    cn = re.sub(r'[а-яА-ЯёЁ\s]', '', str(info.get("cn_name", "")))
-    en = re.sub(r'[а-яА-ЯёЁ\s]', '', str(info.get("en_name", "")))
-    size = re.sub(r'\s', '', str(info.get("size", "")))
+    # Изолируем перевод цвета и типа, жестко вычищаем русский
+    cn_color = re.sub(r'[а-яА-ЯёЁ\s]', '', str(info.get("cn_color", "")).replace('None', '').replace('null', ''))
+    cn_type = re.sub(r'[а-яА-ЯёЁ\s]', '', str(info.get("cn_type", "")).replace('None', '').replace('null', ''))
+    # Python сам склеивает китайское: Цвет + Товар
+    cn = cn_color + cn_type
+    
+    en_color = re.sub(r'[а-яА-ЯёЁ\s]', '', str(info.get("en_color", "")).replace('None', '').replace('null', ''))
+    en_type = re.sub(r'[а-яА-ЯёЁ\s]', '', str(info.get("en_type", "")).replace('None', '').replace('null', ''))
+    # Python сам склеивает английское: Цвет + Товар
+    en = en_color + en_type
+    
+    size = re.sub(r'\s', '', str(info.get("size", "")).replace('None', '').replace('null', ''))
     
     ai_art = str(info.get("article", "")).strip()
-    color = str(info.get("color", "")).strip()
+    raw_color = str(info.get("raw_color", "")).strip()
     
-    if color and color.lower() not in ['none', 'null', '无', 'нет', '']:
-        if color.lower() not in ai_art.lower():
-            ai_art = f"{ai_art} {color}"
+    # Добавляем оригинальный цвет в артикул
+    if raw_color and raw_color.lower() not in ['none', 'null', '无', 'нет', '']:
+        if raw_color.lower() not in ai_art.lower():
+            ai_art = f"{ai_art} {raw_color}"
             
     reg_art = str(regex_article).strip()
     full_article = ai_art if len(ai_art) > len(reg_art) else reg_art
