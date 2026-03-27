@@ -26,13 +26,13 @@ AIRTABLE_BASE_ID = "appRIlSL63Kxh6iWX"
 TABLE_ORDERS = "Закупка"
 TABLE_CARGO = "Логистика Карго"
 
-# Инструкция для китайского фулфилмента
+# Инструкция для китайского фулфилмента (максимальный акцент на визуальные детали)
 SYSTEM_MSG_NAMING = (
     "Ты — эксперт по логистике в Китае. Твоя задача — создать имя файла для китайского фулфилмента. "
     "Формат СТРОГО: [Описание на китайском]_[Description in English]_[Размер]_[Артикул]_[Штрихкод]. "
-    "В описании ОБЯЗАТЕЛЬНО укажи: что это за товар, его ЦВЕТ и МАТЕРИАЛ (или тип набора). "
+    "В описании ОБЯЗАТЕЛЬНО укажи: что это за товар, его ЦВЕТ и МАТЕРИАЛ (или тип набора), чтобы рабочий на складе не перепутал товары. "
     "Пример: 棕色虎纹套装_BrownTigerSet_M_880002359_2049595583930. "
-    "Выдай только одну строку текста, без лишних слов."
+    "Если размера нет, ставь '-'. Выдай только одну строку текста, без лишних слов, без расширения .pdf."
 )
 
 # --- ФУНКЦИИ ИИ ---
@@ -74,6 +74,7 @@ async def write_to_airtable(data: dict):
         try: return datetime.strptime(d, "%d.%m.%Y").strftime("%Y-%m-%d")
         except: return datetime.now().strftime("%Y-%m-%d")
 
+    # ТИП 1: ВЫКУП
     if "Invoice_ID" in data:
         table = api.table(AIRTABLE_BASE_ID, TABLE_ORDERS)
         full_id = data.get("Invoice_ID", "")
@@ -86,23 +87,31 @@ async def write_to_airtable(data: dict):
             "Расход материалов (¥)": float(data.get("China_Logistics_CNY", 0)), "Кол-во коробок": int(data.get("FF_Boxes_Qty", 0))
         }
         table.create(record, typecast=True)
-        return f"✅ Выкупы: {client_name} добавлен!"
+        return f"✅ Выкупы: Заказ {full_id} для {client_name} добавлен!"
 
+    # ТИП 2: ЛОГИСТИКА КАРГО
     elif "Party_ID" in data:
         table = api.table(AIRTABLE_BASE_ID, TABLE_CARGO)
         record = {
-            "Party_ID": data.get("Party_ID"), "Date": fmt_date(data.get("Date")),
-            "Total_Weight_KG": float(data.get("Total_Weight_KG", 0)), "Total_Volume_CBM": float(data.get("Total_Volume_CBM", 0)),
-            "Total_Pieces": int(data.get("Total_Pieces", 0)), "Density": int(data.get("Density", 0)),
-            "Packaging_Type": data.get("Packaging_Type", "Сборная"), "Tariff_Cargo_USD": float(data.get("Tariff_Cargo_USD", 0)),
-            "Tariff_Client_USD": float(data.get("Tariff_Client_USD", 0)), "Rate_USD_CNY": float(data.get("Rate_USD_CNY", 0)),
-            "Rate_USD_AMD": float(data.get("Rate_USD_AMD", 0)), "Total_Client_AMD": int(data.get("Total_Client_AMD", 0)),
-            "Total_Cargo_CNY": int(data.get("Total_Cargo_CNY", 0)), "Net_Profit_AMD": int(data.get("Net_Profit_AMD", 0)),
+            "Party_ID": data.get("Party_ID"), 
+            "Date": fmt_date(data.get("Date")),
+            "Total_Weight_KG": float(data.get("Total_Weight_KG", 0)), 
+            "Total_Volume_CBM": float(data.get("Total_Volume_CBM", 0)),
+            "Total_Pieces": int(data.get("Total_Pieces", 0)), 
+            "Density": int(data.get("Density", 0)),
+            "Packaging_Type": data.get("Packaging_Type", "Сборная"), 
+            "Tariff_Cargo_USD": float(data.get("Tariff_Cargo_USD", 0)),
+            "Tariff_Client_USD": float(data.get("Tariff_Client_USD", 0)), 
+            "Rate_USD_CNY": float(data.get("Rate_USD_CNY", 0)),
+            "Rate_USD_AMD": float(data.get("Rate_USD_AMD", 0)), 
+            "Total_Client_AMD": int(data.get("Total_Client_AMD", 0)),
+            "Total_Cargo_CNY": int(data.get("Total_Cargo_CNY", 0)), 
+            "Net_Profit_AMD": int(data.get("Net_Profit_AMD", 0)),
             "Logistics_Status": "Выполнен"
         }
         table.create(record, typecast=True)
         return f"✅ Карго: Партия {data.get('Party_ID')} добавлена!"
-    return "❌ Ошибка: Тип данных не определен."
+    return "❌ Ошибка: Тип данных не определен (нет Invoice_ID или Party_ID)."
 
 # --- ОБРАБОТЧИКИ ---
 
@@ -111,6 +120,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not text: return
     if text.strip().startswith('/calc'): return
 
+    # Команда /paste
     if text.startswith('/paste'):
         raw_input = text.replace('/paste', '').strip()
         msg = await update.message.reply_text("⏳ Формирую шаблон...")
@@ -119,6 +129,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await msg.edit_text(res.strip())
         return
 
+    # Airtable парсинг
     if "AIRTABLE_EXPORT_START" in text:
         data = re.search(r'AIRTABLE_EXPORT_START(.*?)AIRTABLE_EXPORT_END', text, re.DOTALL)
         if data:
@@ -131,6 +142,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text(status)
         return
 
+    # Обычное общение с ИИ
     resp = await ask_kimi(text)
     await update.message.reply_text(resp[:4000])
 
@@ -149,23 +161,30 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         # ОБРАБОТКА ЭТИКЕТКИ ДЛЯ КИТАЙЦЕВ
         barcode, ocr_text, art = await extract_image_data(Image.open(buf))
+        
         prompt = (
             f"Текст с этикетки: {ocr_text}. Артикул: {art}. Штрихкод: {barcode}. "
-            f"Выдели ГЛАВНОЕ для китайского рабочего: что за товар, какой цвет и какой набор. "
-            f"Сформируй имя файла по шаблону."
+            f"Внимательно изучи текст и выдели ГЛАВНОЕ для китайского рабочего: что за товар, какой цвет и материал/набор. "
+            f"Сформируй имя файла строго по шаблону."
         )
+        
         new_name_raw = await ask_kimi(prompt, image_b64=img_b64, system_msg=SYSTEM_MSG_NAMING)
         final_name = re.sub(r'[\\/*?:"<>|]', '', new_name_raw.strip()) + ".pdf"
-        await update.message.reply_text(f"✅ Готово для склада!\n📄 `{final_name}`\n\nBarcode: {barcode}\nArt: {art}")
+        
+        await update.message.reply_text(
+            f"✅ **Готово для склада!**\n\n"
+            f"📄 Имя файла:\n`{final_name}`\n\n"
+            f"Barcode: {barcode}\nArt: {art}"
+        )
 
 async def show_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     menu_text = (
         "<b>📂 Меню GS Orders Bot:</b>\n\n"
-        "1️⃣ <b>/paste [данные]</b> - расчет в шаблон /calc\n"
-        "2️⃣ <b>/1688 [фото]</b> - инфо о поставщике\n"
+        "1️⃣ <b>/paste [данные]</b> - перенос расчета в шаблон /calc\n"
+        "2️⃣ <b>/1688 [фото]</b> - инфо о поставщике с картинки\n"
         "3️⃣ <b>/hs [фото]</b> - подбор кодов ТН ВЭД\n"
-        "4️⃣ <b>Этикетки [фото]</b> - имя файла для склада в Китае\n"
-        "5️⃣ <b>AIRTABLE_EXPORT</b> - авто-запись в базу"
+        "4️⃣ <b>Просто фото этикетки</b> - формирует китайское имя файла для склада\n"
+        "5️⃣ <b>AIRTABLE_EXPORT</b> - авто-запись данных в базу"
     )
     await update.message.reply_text(menu_text, parse_mode='HTML')
 
@@ -175,7 +194,7 @@ def main():
     commands = [
         BotCommand("start", "Запустить"),
         BotCommand("menu", "Показать все функции"),
-        BotCommand("paste", "GS /calc")
+        BotCommand("paste", "Конвертер /calc")
     ]
     
     app.add_handler(CommandHandler("start", lambda u, c: u.message.reply_text("🤖 Бот готов! Нажми /menu")))
