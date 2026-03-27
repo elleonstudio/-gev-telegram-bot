@@ -26,7 +26,7 @@ AIRTABLE_BASE_ID = "appRIlSL63Kxh6iWX"
 TABLE_ORDERS = "Закупка"
 TABLE_CARGO = "Логистика Карго"
 
-# Инструкция для китайского фулфилмента (максимальный акцент на визуальные детали)
+# Инструкция для китайского фулфилмента
 SYSTEM_MSG_NAMING = (
     "Ты — эксперт по логистике в Китае. Твоя задача — создать имя файла для китайского фулфилмента. "
     "Формат СТРОГО: [Описание на китайском]_[Description in English]_[Размер]_[Артикул]_[Штрихкод]. "
@@ -74,7 +74,6 @@ async def write_to_airtable(data: dict):
         try: return datetime.strptime(d, "%d.%m.%Y").strftime("%Y-%m-%d")
         except: return datetime.now().strftime("%Y-%m-%d")
 
-    # ТИП 1: ВЫКУП
     if "Invoice_ID" in data:
         table = api.table(AIRTABLE_BASE_ID, TABLE_ORDERS)
         full_id = data.get("Invoice_ID", "")
@@ -89,24 +88,16 @@ async def write_to_airtable(data: dict):
         table.create(record, typecast=True)
         return f"✅ Выкупы: Заказ {full_id} для {client_name} добавлен!"
 
-    # ТИП 2: ЛОГИСТИКА КАРГО
     elif "Party_ID" in data:
         table = api.table(AIRTABLE_BASE_ID, TABLE_CARGO)
         record = {
-            "Party_ID": data.get("Party_ID"), 
-            "Date": fmt_date(data.get("Date")),
-            "Total_Weight_KG": float(data.get("Total_Weight_KG", 0)), 
-            "Total_Volume_CBM": float(data.get("Total_Volume_CBM", 0)),
-            "Total_Pieces": int(data.get("Total_Pieces", 0)), 
-            "Density": int(data.get("Density", 0)),
-            "Packaging_Type": data.get("Packaging_Type", "Сборная"), 
-            "Tariff_Cargo_USD": float(data.get("Tariff_Cargo_USD", 0)),
-            "Tariff_Client_USD": float(data.get("Tariff_Client_USD", 0)), 
-            "Rate_USD_CNY": float(data.get("Rate_USD_CNY", 0)),
-            "Rate_USD_AMD": float(data.get("Rate_USD_AMD", 0)), 
-            "Total_Client_AMD": int(data.get("Total_Client_AMD", 0)),
-            "Total_Cargo_CNY": int(data.get("Total_Cargo_CNY", 0)), 
-            "Net_Profit_AMD": int(data.get("Net_Profit_AMD", 0)),
+            "Party_ID": data.get("Party_ID"), "Date": fmt_date(data.get("Date")),
+            "Total_Weight_KG": float(data.get("Total_Weight_KG", 0)), "Total_Volume_CBM": float(data.get("Total_Volume_CBM", 0)),
+            "Total_Pieces": int(data.get("Total_Pieces", 0)), "Density": int(data.get("Density", 0)),
+            "Packaging_Type": data.get("Packaging_Type", "Сборная"), "Tariff_Cargo_USD": float(data.get("Tariff_Cargo_USD", 0)),
+            "Tariff_Client_USD": float(data.get("Tariff_Client_USD", 0)), "Rate_USD_CNY": float(data.get("Rate_USD_CNY", 0)),
+            "Rate_USD_AMD": float(data.get("Rate_USD_AMD", 0)), "Total_Client_AMD": int(data.get("Total_Client_AMD", 0)),
+            "Total_Cargo_CNY": int(data.get("Total_Cargo_CNY", 0)), "Net_Profit_AMD": int(data.get("Net_Profit_AMD", 0)),
             "Logistics_Status": "Выполнен"
         }
         table.create(record, typecast=True)
@@ -120,7 +111,6 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not text: return
     if text.strip().startswith('/calc'): return
 
-    # Команда /paste
     if text.startswith('/paste'):
         raw_input = text.replace('/paste', '').strip()
         msg = await update.message.reply_text("⏳ Формирую шаблон...")
@@ -129,7 +119,6 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await msg.edit_text(res.strip())
         return
 
-    # Airtable парсинг
     if "AIRTABLE_EXPORT_START" in text:
         data = re.search(r'AIRTABLE_EXPORT_START(.*?)AIRTABLE_EXPORT_END', text, re.DOTALL)
         if data:
@@ -142,7 +131,6 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text(status)
         return
 
-    # Обычное общение с ИИ
     resp = await ask_kimi(text)
     await update.message.reply_text(resp[:4000])
 
@@ -159,9 +147,50 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         res = await ask_kimi("Suggest 3 HS Codes.", image_b64=img_b64, system_msg="Broker.")
         await update.message.reply_text(res)
     else:
-        # ОБРАБОТКА ЭТИКЕТКИ ДЛЯ КИТАЙЦЕВ
+        msg = await update.message.reply_text("⏳ Читаю фото...")
         barcode, ocr_text, art = await extract_image_data(Image.open(buf))
+        prompt = (
+            f"Текст с этикетки: {ocr_text}. Артикул: {art}. Штрихкод: {barcode}. "
+            f"Внимательно изучи текст и выдели ГЛАВНОЕ для китайского рабочего: что за товар, какой цвет и материал/набор. "
+            f"Сформируй имя файла строго по шаблону."
+        )
+        new_name_raw = await ask_kimi(prompt, image_b64=img_b64, system_msg=SYSTEM_MSG_NAMING)
+        final_name = re.sub(r'[\\/*?:"<>|]', '', new_name_raw.strip())
+        if not final_name.lower().endswith('.pdf'): final_name += ".pdf"
         
+        await msg.edit_text(
+            f"✅ **Готово для склада!**\n\n"
+            f"📄 Имя файла:\n`{final_name}`\n\n"
+            f"Barcode: {barcode}\nArt: {art}"
+        )
+
+# ВОССТАНОВЛЕННЫЙ ОБРАБОТЧИК PDF
+async def handle_doc(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    doc = update.message.document
+    
+    # Проверяем, что это PDF
+    if not doc.file_name.lower().endswith('.pdf'):
+        return
+
+    msg = await update.message.reply_text("⏳ Обрабатываю PDF...")
+    try:
+        buf = BytesIO()
+        file = await context.bot.get_file(doc.file_id)
+        await file.download_to_memory(buf)
+        buf.seek(0)
+        
+        # Конвертируем первую страницу PDF в картинку для чтения
+        images = convert_from_bytes(buf.read(), dpi=200, first_page=1, last_page=1)
+        image = images[0]
+        
+        # Достаем текст
+        barcode, ocr_text, art = await extract_image_data(image)
+        
+        # Переводим картинку в base64 для ИИ (чтобы он сам увидел этикетку)
+        img_byte_arr = BytesIO()
+        image.save(img_byte_arr, format='JPEG')
+        img_b64 = base64.b64encode(img_byte_arr.getvalue()).decode('utf-8')
+
         prompt = (
             f"Текст с этикетки: {ocr_text}. Артикул: {art}. Штрихкод: {barcode}. "
             f"Внимательно изучи текст и выдели ГЛАВНОЕ для китайского рабочего: что за товар, какой цвет и материал/набор. "
@@ -169,13 +198,19 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         
         new_name_raw = await ask_kimi(prompt, image_b64=img_b64, system_msg=SYSTEM_MSG_NAMING)
-        final_name = re.sub(r'[\\/*?:"<>|]', '', new_name_raw.strip()) + ".pdf"
+        final_name = re.sub(r'[\\/*?:"<>|]', '', new_name_raw.strip())
+        if not final_name.lower().endswith('.pdf'):
+            final_name += ".pdf"
         
-        await update.message.reply_text(
-            f"✅ **Готово для склада!**\n\n"
-            f"📄 Имя файла:\n`{final_name}`\n\n"
-            f"Barcode: {barcode}\nArt: {art}"
+        # Отправляем переименованный файл обратно
+        buf.seek(0)
+        await msg.delete()
+        await update.message.reply_document(
+            document=InputFile(buf, filename=final_name), 
+            caption=f"✅ Готово!\n📄 `{final_name}`\nBarcode: {barcode}\nArt: {art}"
         )
+    except Exception as e:
+        await msg.edit_text(f"❌ Ошибка при чтении PDF: {e}")
 
 async def show_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     menu_text = (
@@ -183,7 +218,7 @@ async def show_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "1️⃣ <b>/paste [данные]</b> - перенос расчета в шаблон /calc\n"
         "2️⃣ <b>/1688 [фото]</b> - инфо о поставщике с картинки\n"
         "3️⃣ <b>/hs [фото]</b> - подбор кодов ТН ВЭД\n"
-        "4️⃣ <b>Просто фото этикетки</b> - формирует китайское имя файла для склада\n"
+        "4️⃣ <b>Этикетки (Фото или PDF)</b> - формирует китайское имя файла для склада\n"
         "5️⃣ <b>AIRTABLE_EXPORT</b> - авто-запись данных в базу"
     )
     await update.message.reply_text(menu_text, parse_mode='HTML')
@@ -201,6 +236,9 @@ def main():
     app.add_handler(CommandHandler("menu", show_menu))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
     app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
+    
+    # ВОТ ОНО - ВОЗВРАЩЕНИЕ ОБРАБОТЧИКА ДОКУМЕНТОВ
+    app.add_handler(MessageHandler(filters.Document.ALL, handle_doc))
     
     async def set_commands(application):
         await application.bot.set_my_commands(commands)
