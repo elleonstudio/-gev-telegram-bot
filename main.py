@@ -14,25 +14,23 @@ import pytesseract
 from pyzbar.pyzbar import decode
 from pyairtable import Api
 
-# --- НАСТРОЙКИ ЛОГИРОВАНИЯ ---
+# --- НАСТРОЙКИ ---
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# --- ТОКЕНЫ И КОНФИГУРАЦИЯ ---
 TELEGRAM_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
 KIMI_API_KEY = os.getenv('KIMI_API_KEY')
 AIRTABLE_TOKEN = "pati6TFqzPlZaI08o.88a1e98775f215fb08b58c2fde28b38acebc5f4556c8eb850b9ca9930dbcf607"
 AIRTABLE_BASE_ID = "appRIlSL63Kxh6iWX"
 
-# Названия таблиц в Airtable
 TABLE_ORDERS = "Закупка"
 TABLE_CARGO = "Логистика Карго"
 
 SYSTEM_MSG_NAMING = "Ты ассистент по именам файлов. Формат: 中文_English_Размер_Артикул_Штрихкод.pdf. Перевод обязателен."
 
-# --- ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ---
+# --- ФУНКЦИИ ИИ И ОБРАБОТКИ ---
 
-async def ask_kimi(prompt: str, image_b64: str = None, system_msg: str = "Ты ИИ-ассистент.") -> str:
+async def ask_kimi(prompt: str, image_b64: str = None, system_msg: str = "Ты ассистент.") -> str:
     headers = {'Authorization': f'Bearer {KIMI_API_KEY}', 'Content-Type': 'application/json'}
     model = 'moonshot-v1-8k-vision-preview' if image_b64 else 'moonshot-v1-8k'
     content = [{'type': 'text', 'text': prompt}]
@@ -81,13 +79,12 @@ async def write_to_airtable(data: dict):
         try: return datetime.strptime(d, "%d.%m.%Y").strftime("%Y-%m-%d")
         except: return datetime.now().strftime("%Y-%m-%d")
 
-    # ТИП 1: ЗАКАЗЫ (ВЫКУП)
+    # ТИП 1: ВЫКУП (ORDERS)
     if "Invoice_ID" in data:
         table = api.table(AIRTABLE_BASE_ID, TABLE_ORDERS)
         full_id = data.get("Invoice_ID", "")
-        client_name = ""
-        match = re.match(r'^([a-zA-Z]+)', full_id)
-        if match: client_name = match.group(1).capitalize()
+        client_match = re.match(r'^([a-zA-Z]+)', full_id)
+        client_name = client_match.group(1).capitalize() if client_match else ""
 
         record = {
             "Код Карго": full_id,
@@ -101,65 +98,57 @@ async def write_to_airtable(data: dict):
             "Кол-во коробок": int(data.get("FF_Boxes_Qty", 0))
         }
         table.create(record, typecast=True)
-        return f"✅ Данные [Выкуп] для {client_name} добавлены!"
+        return f"✅ Выкуп для {client_name} добавлен!"
 
-    # ТИП 2: ЛОГИСТИКА КАРГО (ВАЖНО: Поля на английском!)
+    # ТИП 2: ЛОГИСТИКА КАРГО (ОБНОВЛЕНО ПОД ТВОИ СКРИНШОТЫ)
     elif "Party_ID" in data:
         table = api.table(AIRTABLE_BASE_ID, TABLE_CARGO)
         record = {
             "Party_ID": data.get("Party_ID"),
             "Date": fmt_date(data.get("Date")),
-            "Weight": float(data.get("Total_Weight_KG", 0)),
-            "Volume": float(data.get("Total_Volume_CBM", 0)),
-            "Pieces": int(data.get("Total_Pieces", 0)),
+            "Total_Weight_KG": float(data.get("Total_Weight_KG", 0)),
+            "Total_Volume_CBM": float(data.get("Total_Volume_CBM", 0)),
+            "Total_Pieces": int(data.get("Total_Pieces", 0)),
             "Density": int(data.get("Density", 0)),
-            "Packaging": data.get("Packaging_Type", "Сборная"),
-            "Tariff_Cargo": float(data.get("Tariff_Cargo_USD", 0)),
-            "Tariff_Client": float(data.get("Tariff_Client_USD", 0)),
-            "Rate_CNY": float(data.get("Rate_USD_CNY", 0)),
-            "Rate_AMD": float(data.get("Rate_USD_AMD", 0)),
-            "Sum_AMD": int(data.get("Total_Client_AMD", 0)),
-            "Sum_CNY": int(data.get("Total_Cargo_CNY", 0)),
-            "Profit_AMD": int(data.get("Net_Profit_AMD", 0))
+            "Packaging_Type": data.get("Packaging_Type", "Сборная"),
+            "Tariff_Cargo_USD": float(data.get("Tariff_Cargo_USD", 0)),
+            "Tariff_Client_USD": float(data.get("Tariff_Client_USD", 0)),
+            "Rate_USD_CNY": float(data.get("Rate_USD_CNY", 0)),
+            "Rate_USD_AMD": float(data.get("Rate_USD_AMD", 0)),
+            "Total_Client_AMD": int(data.get("Total_Client_AMD", 0)),
+            "Total_Cargo_CNY": int(data.get("Total_Cargo_CNY", 0)),
+            "Net_Profit_AMD": int(data.get("Net_Profit_AMD", 0)),
+            "Logistics_Status": "Выполнен"
         }
         table.create(record, typecast=True)
         return f"✅ Партия {data.get('Party_ID')} добавлена в Логистику!"
     
     return "❌ Ошибка: Тип данных не определен."
 
-# --- ОБРАБОТЧИКИ СООБЩЕНИЙ ---
+# --- ОБРАБОТЧИКИ ---
 
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text
     if not text: return
-
     if text.strip().startswith('/calc'): return
 
-    # 1. КОМАНДА /paste
+    # Команда /paste
     if text.startswith('/paste'):
         raw_input = text.replace('/paste', '').strip()
         msg = await update.message.reply_text("⏳ Формирую шаблон...")
-        system_paste = (
-            "Ты — конвертер. Разбей расчет пользователя на части.\n"
-            "Цена - первое число, Кол-во - после 'x', Доставка - после '+'. Игнорируй результат после '='.\n"
-            "Курс клиента всегда 58, мой курс всегда 55. Закупка altijd '-'.\n"
-            "Ответ начни строго с /calc"
-        )
-        res = await ask_kimi(f"Заполни шаблон /calc: {raw_input}", system_msg=system_paste)
+        system_paste = "Ты конвертер. Расставь данные в шаблон /calc. Цена - 1-е число, Кол-во - после x, Доставка - после +. Курс: 58/55. Закупка: -. Начало ответа: /calc"
+        res = await ask_kimi(f"Данные: {raw_input}", system_msg=system_paste)
         await msg.edit_text(res.strip())
         return
 
-    # 2. ЭКСПОРТ В AIRTABLE
+    # Экспорт в Airtable
     if "AIRTABLE_EXPORT_START" in text:
         data = parse_airtable_block(text)
         if data:
             status = await write_to_airtable(data)
             await update.message.reply_text(status)
-        else:
-            await update.message.reply_text("❌ Ошибка данных.")
         return
 
-    # 3. ОБЫЧНЫЙ ЧАТ
     resp = await ask_kimi(text)
     await update.message.reply_text(resp[:4000])
 
@@ -171,40 +160,25 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     img_b64 = base64.b64encode(buf.getvalue()).decode('utf-8')
 
     if caption.startswith('/1688'):
-        res = await ask_kimi("Extract Supplier Info: Company CN/EN, Tax ID, Address CN/EN, Phone. No emojis. Use code blocks.", image_b64=img_b64, system_msg="1688 Expert.")
+        res = await ask_kimi("Supplier Info CN/EN. Tax ID, Address, Phone. Code blocks.", image_b64=img_b64, system_msg="1688 Expert.")
         await update.message.reply_text(res, parse_mode='Markdown')
-        
     elif caption.startswith('/hs'):
-        res = await ask_kimi(f"Suggest 3 REAL HS Codes. Info: {caption}", image_b64=img_b64, system_msg="Customs Broker.")
+        res = await ask_kimi(f"HS Code 4/6/10 digits. Info: {caption}", image_b64=img_b64, system_msg="Customs Broker.")
         codes = re.findall(r'\b\d{4,10}\b', res)
         links = "\n\n🔍 **Alta.ru:**\n" + "\n".join([f"👉 [Код {c}](https://www.alta.ru/tnved/code/{c}/)" for c in set(codes)])
         await update.message.reply_text(res + links, parse_mode='Markdown', disable_web_page_preview=True)
-        
     else:
         barcode, ocr_text, art = await extract_image_data(Image.open(buf))
-        new_name = await ask_kimi(f"Naming for file. Text: {ocr_text}", image_b64=img_b64, system_msg=SYSTEM_MSG_NAMING)
+        new_name = await ask_kimi(f"Naming: {ocr_text}", image_b64=img_b64, system_msg=SYSTEM_MSG_NAMING)
         new_name = re.sub(r'[\\/*?:"<>|]', '', new_name.strip()) + ".pdf"
-        await update.message.reply_text(f"📄 `{new_name}`\n\n✅ Штрих-код: {barcode}\n✅ Артикул: {art}")
-
-async def handle_doc(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    doc = update.message.document
-    buf = BytesIO()
-    await (await context.bot.get_file(doc.file_id)).download_to_memory(buf)
-    buf.seek(0)
-    images = convert_from_bytes(buf.read(), dpi=200, first_page=1, last_page=1)
-    barcode, ocr_text, art = await extract_image_data(images[0])
-    new_name = await ask_kimi(f"Naming: {ocr_text}", system_msg=SYSTEM_MSG_NAMING)
-    new_name = re.sub(r'[\\/*?:"<>|]', '', new_name.strip()) + ".pdf"
-    await update.message.reply_document(document=InputFile(buf, filename=new_name), caption=f"📄 {new_name}")
+        await update.message.reply_text(f"📄 `{new_name}`\nBarcode: {barcode}\nArt: {art}")
 
 def main():
     app = Application.builder().token(TELEGRAM_TOKEN).build()
-    app.add_handler(CommandHandler("start", lambda u, c: u.message.reply_text("🤖 Бот GS Orders готов!")))
+    app.add_handler(CommandHandler("start", lambda u, c: u.message.reply_text("🤖 Бот запущен!")))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
     app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
-    app.add_handler(MessageHandler(filters.Document.ALL, handle_doc))
-    # drop_pending_updates=True лечит конфликт getUpdates
-    app.run_polling(drop_pending_updates=True)
+    app.run_polling(drop_pending_updates=True) # Очистка старых обновлений
 
 if __name__ == '__main__':
     main()
