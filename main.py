@@ -6,7 +6,7 @@ import aiohttp
 from io import BytesIO
 from datetime import datetime
 
-from telegram import Update, BotCommand, InlineKeyboardButton, InlineKeyboardMarkup, InputFile, ReplyKeyboardRemove
+from telegram import Update, BotCommand, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardRemove
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes, CallbackQueryHandler
 from pdf2image import convert_from_bytes
 from PIL import Image
@@ -23,19 +23,20 @@ KIMI_API_KEY = os.getenv('KIMI_API_KEY')
 AIRTABLE_TOKEN = "pati6TFqzPlZaI08o.88a1e98775f215fb08b58c2fde28b38acebc5f4556c8eb850b9ca9930dbcf607"
 AIRTABLE_BASE_ID = "appRIlSL63Kxh6iWX"
 
+# Жесткая инструкция для нейросети
 SYSTEM_MSG_DETAILED = (
-    "Ты эксперт по складской логистике. Разбери текст этикетки.\n"
-    "Ответ строго по шаблону:\n"
-    "✅ Артикул: [артикул]\n"
+    "Ты эксперт по логистике. Твоя задача — разобрать этикетку.\n"
+    "СТРОГО соблюдай этот шаблон ответа, не добавляй лишнего текста:\n"
+    "✅ Артикул: [артикул или ➖]\n"
     "📝 Детали с этикетки:\n"
-    "🔸 Товар: [что это]\n"
+    "🔸 Товар: [название товара или ➖]\n"
     "🔸 Цвет: [цвет или ➖]\n"
     "🔸 Размер: [размер или ➖]\n"
     "🔸 Материал: [материал или ➖]\n"
     "🔸 Комплект: [комплект или ➖]\n"
     "🔸 Свойства: [свойства или ➖]\n"
     "🔸 Дата: [дата или ➖]\n\n"
-    "ФАЙЛ: [中文_English_Артикул]"
+    "ФАЙЛ: [Перевод_Товара_Китайский]_[Перевод_Товара_Английский]_[Артикул_без_пробелов]"
 )
 
 # --- ПРОВЕРКА ШТРИХ-КОДА ---
@@ -83,19 +84,25 @@ async def process_image(img_pil):
 
 # --- ОБРАБОТЧИКИ КОМАНД ---
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("🚫 Операция прервана. Очередь очищена.", reply_markup=ReplyKeyboardRemove())
-    context.user_data.clear()
+    await update.message.reply_text("🚫 Операция прервана.", reply_markup=ReplyKeyboardRemove())
 
 async def show_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    text = "<b>📂 GS Assistant: Главное меню</b>\n\nВыбери нужную функцию:"
+    text = "<b>📂 GS Assistant: Главное меню</b>"
     kb = [[InlineKeyboardButton("📖 Руководство", callback_data='help')]]
     await update.message.reply_text(text, reply_markup=InlineKeyboardMarkup(kb), parse_mode='HTML')
 
-# --- ОБРАБОТЧИК МЕДИА ---
+# --- ИДЕАЛЬНЫЙ ОБРАБОТЧИК МЕДИА ---
 async def handle_media(update: Update, context: ContextTypes.DEFAULT_TYPE):
     status_msg = await update.message.reply_text("⏳ Начинаю обработку...")
     try:
-        file_id = update.message.photo[-1].file_id if update.message.photo else update.message.document.file_id
+        # Универсально для фото и файлов без ошибки IndexError!
+        if update.message.photo:
+            file_id = update.message.photo[-1].file_id
+        elif update.message.document:
+            file_id = update.message.document.file_id
+        else:
+            return await status_msg.edit_text("❌ Формат не поддерживается.")
+
         tg_file = await context.bot.get_file(file_id)
         buf = BytesIO()
         await tg_file.download_to_memory(buf)
@@ -107,7 +114,7 @@ async def handle_media(update: Update, context: ContextTypes.DEFAULT_TYPE):
         else:
             images = [Image.open(buf)]
 
-        await status_msg.edit_text(f"📦 <b>Страниц: {len(images)}</b>\n⏳ Обрабатываю...", parse_mode='HTML')
+        await status_msg.edit_text(f"📦 <b>Страниц: {len(images)}</b>\n⏳ Нейросеть изучает этикетки...", parse_mode='HTML')
 
         reports = []
         first_file_name = "Product.pdf"
@@ -117,24 +124,47 @@ async def handle_media(update: Update, context: ContextTypes.DEFAULT_TYPE):
             ean_info = "(EAN-13 верен)" if is_ean13_valid(barcode) else "(Читается)"
             if barcode == "➖": ean_info = ""
 
-            # WB Link
-            wb_link = ""
-            art_match = re.search(r'Артикул:\s*([^\n🔸]+)', analysis)
-            if art_match:
-                digits = re.sub(r'\D', '', art_match.group(1))
-                if digits: wb_link = f" 👉 <a href='https://www.wildberries.ru/catalog/{digits}/detail.aspx'>Посмотреть на WB</a>"
+            # Умный разбор ответа (добавление ссылки WB и создание имени файла)
+            file_prefix = "Product"
+            new_analysis_lines = []
+            
+            for line in analysis.split('\n'):
+                line = line.strip()
+                if not line:
+                    new_analysis_lines.append("")
+                    continue
+                    
+                if line.startswith('ФАЙЛ:'):
+                    file_prefix = line.replace('ФАЙЛ:', '').strip()
+                    continue
+                    
+                if line.startswith('✅ Артикул:'):
+                    art_val = line.replace('✅ Артикул:', '').strip()
+                    digits = re.sub(r'\D', '', art_val)
+                    wb_link = f" 👉 <a href='https://www.wildberries.ru/catalog/{digits}/detail.aspx'>Посмотреть на WB</a>" if digits else ""
+                    new_analysis_lines.append(f"✅ Артикул: {art_val}{wb_link}")
+                else:
+                    new_analysis_lines.append(line)
 
-            if i == 0:
-                name_match = re.search(r'ФАЙЛ:\s*(\S+)', analysis)
-                first_file_name = f"{name_match.group(1) if name_match else 'Product'}_{barcode}.pdf"
+            # Чистим имя файла от запрещенных символов
+            file_prefix = re.sub(r'[\\/*?:"<>|]', '', file_prefix).replace(' ', '')
+            if not file_prefix or file_prefix == "➖": file_prefix = "Product"
+            
+            current_file_name = f"{file_prefix}_{barcode}.pdf"
+            if i == 0: first_file_name = current_file_name
+            
+            clean_text = "\n".join(new_analysis_lines).strip()
+            page_header = "" if len(images) == 1 else f"📑 <b>Страница {i+1}:</b>\n"
+            
+            report = f"{page_header}✅ Штрих-код: {barcode} {ean_info}\n{clean_text}\n\n📄 <code>{current_file_name}</code>"
+            reports.append(report)
 
-            clean_analysis = analysis.split('ФАЙЛ:')[0].strip()
-            reports.append(f"📄 <b>Стр {i+1}:</b>\n✅ Штрих-код: <code>{barcode}</code> {ean_info}\n{clean_analysis}{wb_link}")
+        # Вывод текста
+        final_text = f"📦 <b>Страниц: {len(images)}</b>\n\n" + "\n\n---\n\n".join(reports)
+        await update.message.reply_text(final_text, parse_mode='HTML', disable_web_page_preview=True)
 
-        await update.message.reply_text("\n\n---\n\n".join(reports), parse_mode='HTML', disable_web_page_preview=True)
-
+        # Вывод переименованного PDF файла
         buf.seek(0)
-        # Отправка файла
         if not (update.message.document and update.message.document.mime_type == 'application/pdf'):
             pdf_buf = BytesIO()
             images[0].convert('RGB').save(pdf_buf, format='PDF')
@@ -145,6 +175,7 @@ async def handle_media(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         await status_msg.delete()
     except Exception as e:
+        logger.error(f"Media Error: {e}")
         await status_msg.edit_text(f"❌ Ошибка: {str(e)}")
 
 def main():
@@ -155,9 +186,7 @@ def main():
     app.add_handler(CommandHandler("cancel", cancel))
     
     app.add_handler(MessageHandler(filters.PHOTO | filters.Document.ALL, handle_media))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, lambda u,c: u.message.reply_text("Используй /menu или пришли фото.")))
     
-    # КЛЮЧЕВОЕ: drop_pending_updates очищает очередь при зависании
     app.run_polling(drop_pending_updates=True)
 
 if __name__ == '__main__':
