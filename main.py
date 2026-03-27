@@ -26,13 +26,16 @@ AIRTABLE_BASE_ID = "appRIlSL63Kxh6iWX"
 TABLE_ORDERS = "Закупка"
 TABLE_CARGO = "Логистика Карго"
 
-# Инструкция для китайского фулфилмента
+# Обновленная инструкция: требуем и имя файла, и детали!
 SYSTEM_MSG_NAMING = (
-    "Ты — эксперт по логистике в Китае. Твоя задача — создать имя файла для китайского фулфилмента. "
-    "Формат СТРОГО: [Описание на китайском]_[Description in English]_[Размер]_[Артикул]_[Штрихкод]. "
-    "В описании ОБЯЗАТЕЛЬНО укажи: что это за товар, его ЦВЕТ и МАТЕРИАЛ (или тип набора), чтобы рабочий на складе не перепутал товары. "
-    "Пример: 棕色虎纹套装_BrownTigerSet_M_880002359_2049595583930. "
-    "Если размера нет, ставь '-'. Выдай только одну строку текста, без лишних слов, без расширения .pdf."
+    "Ты — эксперт по логистике. Твоя задача — извлечь данные с этикетки.\n"
+    "ОТВЕТ ДОЛЖЕН БЫТЬ СТРОГО В ТАКОМ ФОРМАТЕ:\n\n"
+    "FILE: [Описание на китайском]_[Description in English]_[Размер]_[Артикул]_[Штрихкод].pdf\n"
+    "📝 Детали с этикетки:\n"
+    "🔸 Товар: [название]\n"
+    "🔸 Цвет: [цвет]\n"
+    "🔸 Материал: [материал]\n\n"
+    "ПРАВИЛО: В имени файла (в [Описание на китайском]) ОБЯЗАТЕЛЬНО укажи цвет и тип товара иероглифами, чтобы рабочий на складе в Китае ничего не перепутал (например: 棕色虎纹套装). Если размера нет, ставь '-'."
 )
 
 # --- ФУНКЦИИ ИИ ---
@@ -149,65 +152,62 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         msg = await update.message.reply_text("⏳ Читаю фото...")
         barcode, ocr_text, art = await extract_image_data(Image.open(buf))
-        prompt = (
-            f"Текст с этикетки: {ocr_text}. Артикул: {art}. Штрихкод: {barcode}. "
-            f"Внимательно изучи текст и выдели ГЛАВНОЕ для китайского рабочего: что за товар, какой цвет и материал/набор. "
-            f"Сформируй имя файла строго по шаблону."
-        )
-        new_name_raw = await ask_kimi(prompt, image_b64=img_b64, system_msg=SYSTEM_MSG_NAMING)
-        final_name = re.sub(r'[\\/*?:"<>|]', '', new_name_raw.strip())
-        if not final_name.lower().endswith('.pdf'): final_name += ".pdf"
+        prompt = f"Текст с этикетки: {ocr_text}. Артикул: {art}. Штрихкод: {barcode}."
         
-        await msg.edit_text(
-            f"✅ **Готово для склада!**\n\n"
-            f"📄 Имя файла:\n`{final_name}`\n\n"
-            f"Barcode: {barcode}\nArt: {art}"
-        )
+        res_raw = await ask_kimi(prompt, image_b64=img_b64, system_msg=SYSTEM_MSG_NAMING)
+        
+        # Разделяем ответ: достаем имя файла и оставляем детали
+        file_match = re.search(r'FILE:\s*([^\n]+\.pdf)', res_raw, re.IGNORECASE)
+        if file_match:
+            final_name = re.sub(r'[\\/*?:"<>|]', '', file_match.group(1).strip())
+            details = res_raw.replace(file_match.group(0), '').strip()
+        else:
+            final_name = "label_converted.pdf"
+            details = res_raw.strip()
 
-# ВОССТАНОВЛЕННЫЙ ОБРАБОТЧИК PDF
+        caption_text = f"✅ Штрих-код: {barcode}\n✅ Артикул: {art}\n{details}\n\n📄 Имя файла: `{final_name}`"
+        await msg.edit_text(caption_text)
+
+# ОБРАБОТКА PDF
 async def handle_doc(update: Update, context: ContextTypes.DEFAULT_TYPE):
     doc = update.message.document
-    
-    # Проверяем, что это PDF
     if not doc.file_name.lower().endswith('.pdf'):
         return
 
-    msg = await update.message.reply_text("⏳ Обрабатываю PDF...")
+    msg = await update.message.reply_text("⏳ Читаю PDF и переименовываю...")
     try:
         buf = BytesIO()
         file = await context.bot.get_file(doc.file_id)
         await file.download_to_memory(buf)
         buf.seek(0)
         
-        # Конвертируем первую страницу PDF в картинку для чтения
         images = convert_from_bytes(buf.read(), dpi=200, first_page=1, last_page=1)
         image = images[0]
-        
-        # Достаем текст
         barcode, ocr_text, art = await extract_image_data(image)
         
-        # Переводим картинку в base64 для ИИ (чтобы он сам увидел этикетку)
         img_byte_arr = BytesIO()
         image.save(img_byte_arr, format='JPEG')
         img_b64 = base64.b64encode(img_byte_arr.getvalue()).decode('utf-8')
 
-        prompt = (
-            f"Текст с этикетки: {ocr_text}. Артикул: {art}. Штрихкод: {barcode}. "
-            f"Внимательно изучи текст и выдели ГЛАВНОЕ для китайского рабочего: что за товар, какой цвет и материал/набор. "
-            f"Сформируй имя файла строго по шаблону."
-        )
+        prompt = f"Текст с этикетки: {ocr_text}. Артикул: {art}. Штрихкод: {barcode}."
+        res_raw = await ask_kimi(prompt, image_b64=img_b64, system_msg=SYSTEM_MSG_NAMING)
         
-        new_name_raw = await ask_kimi(prompt, image_b64=img_b64, system_msg=SYSTEM_MSG_NAMING)
-        final_name = re.sub(r'[\\/*?:"<>|]', '', new_name_raw.strip())
-        if not final_name.lower().endswith('.pdf'):
-            final_name += ".pdf"
+        # Разделяем ответ на имя файла и красивые детали
+        file_match = re.search(r'FILE:\s*([^\n]+\.pdf)', res_raw, re.IGNORECASE)
+        if file_match:
+            final_name = re.sub(r'[\\/*?:"<>|]', '', file_match.group(1).strip())
+            details = res_raw.replace(file_match.group(0), '').strip()
+        else:
+            final_name = "label_converted.pdf"
+            details = res_raw.strip()
         
-        # Отправляем переименованный файл обратно
         buf.seek(0)
         await msg.delete()
+        caption_text = f"📦 Страниц: 1\n✅ Штрих-код: {barcode}\n✅ Артикул: {art}\n{details}"
+        
         await update.message.reply_document(
             document=InputFile(buf, filename=final_name), 
-            caption=f"✅ Готово!\n📄 `{final_name}`\nBarcode: {barcode}\nArt: {art}"
+            caption=caption_text
         )
     except Exception as e:
         await msg.edit_text(f"❌ Ошибка при чтении PDF: {e}")
@@ -236,8 +236,6 @@ def main():
     app.add_handler(CommandHandler("menu", show_menu))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
     app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
-    
-    # ВОТ ОНО - ВОЗВРАЩЕНИЕ ОБРАБОТЧИКА ДОКУМЕНТОВ
     app.add_handler(MessageHandler(filters.Document.ALL, handle_doc))
     
     async def set_commands(application):
