@@ -23,20 +23,22 @@ KIMI_API_KEY = os.getenv('KIMI_API_KEY')
 AIRTABLE_TOKEN = "pati6TFqzPlZaI08o.88a1e98775f215fb08b58c2fde28b38acebc5f4556c8eb850b9ca9930dbcf607"
 AIRTABLE_BASE_ID = "appRIlSL63Kxh6iWX"
 
-# ОБНОВЛЕННАЯ ЖЕСТКАЯ ИНСТРУКЦИЯ ДЛЯ НЕЙРОСЕТИ (Без скобок, с требованием перевода)
+# НОВАЯ ИНСТРУКЦИЯ: ИИ просто дает переводы, а файл мы собираем сами
 SYSTEM_MSG_DETAILED = (
-    "Ты эксперт по логистике. Разбери этикетку строго по шаблону ниже.\n"
-    "ВНИМАНИЕ: Не используй скобки! В строке ФАЙЛ ты ОБЯЗАН сделать реальный перевод названия товара на китайский (иероглифы) и английский язык.\n\n"
+    "Ты эксперт по логистике. Разбери этикетку.\n"
+    "ПРАВИЛО 1: Если параметра нет на этикетке, ПРОПУСТИ строку (не пиши её).\n"
+    "ПРАВИЛО 2: ОБЯЗАТЕЛЬНО переведи тип товара и цвет на китайский (строго иероглифы!) и английский язык.\n\n"
     "✅ Артикул: значение\n"
     "📝 Детали с этикетки:\n"
     "🔸 Товар: значение\n"
-    "🔸 Цвет: значение или ➖\n"
-    "🔸 Размер: значение или ➖\n"
-    "🔸 Материал: значение или ➖\n"
-    "🔸 Комплект: значение или ➖\n"
-    "🔸 Свойства: значение или ➖\n"
-    "🔸 Дата: значение или ➖\n\n"
-    "ФАЙЛ: ПереводНаКитайский_ПереводНаАнглийский_Артикул"
+    "🔸 Цвет: значение\n"
+    "🔸 Размер: значение\n"
+    "🔸 Материал: значение\n"
+    "🔸 Комплект: значение\n"
+    "🔸 Свойства: значение\n"
+    "🔸 Дата: значение\n\n"
+    "🇨🇳 Китайский: [только иероглифы]\n"
+    "🇬🇧 Английский: [только английский]"
 )
 
 # --- ПРОВЕРКА ШТРИХ-КОДА ---
@@ -113,7 +115,7 @@ async def handle_media(update: Update, context: ContextTypes.DEFAULT_TYPE):
         else:
             images = [Image.open(buf)]
 
-        await status_msg.edit_text(f"📦 <b>Страниц: {len(images)}</b>\n⏳ Нейросеть делает перевод и изучает этикетки...", parse_mode='HTML')
+        await status_msg.edit_text(f"📦 <b>Страниц: {len(images)}</b>\n⏳ Выполняю точный перевод и собираю файл...", parse_mode='HTML')
 
         reports = []
         first_file_name = "Product.pdf"
@@ -123,32 +125,46 @@ async def handle_media(update: Update, context: ContextTypes.DEFAULT_TYPE):
             ean_info = "(EAN-13 верен)" if is_ean13_valid(barcode) else "(Читается)"
             if barcode == "➖": ean_info = ""
 
-            file_prefix = "Product"
+            name_cn = "ProductCN"
+            name_en = "ProductEN"
+            art_val = "NoArt"
             new_analysis_lines = []
             
             for line in analysis.split('\n'):
                 line = line.strip()
-                if not line:
-                    new_analysis_lines.append("")
+                # Удаляем пустые строки и мусор
+                if not line or '➖' in line or ('нет' in line.lower() and '🔸' in line):
                     continue
                     
-                if line.startswith('ФАЙЛ:'):
-                    file_prefix = line.replace('ФАЙЛ:', '').strip()
+                # Вытаскиваем переводы, которые дал ИИ
+                if line.startswith('🇨🇳 Китайский:'):
+                    name_cn = line.replace('🇨🇳 Китайский:', '').strip()
+                    continue
+                if line.startswith('🇬🇧 Английский:'):
+                    name_en = line.replace('🇬🇧 Английский:', '').strip()
                     continue
                     
+                # Вытаскиваем артикул и делаем ссылку
                 if line.startswith('✅ Артикул:'):
-                    art_val = line.replace('✅ Артикул:', '').strip()
-                    digits = re.sub(r'\D', '', art_val)
+                    art_raw = line.replace('✅ Артикул:', '').strip()
+                    art_val = art_raw # Сохраняем для имени файла
+                    digits = re.sub(r'\D', '', art_raw)
                     wb_link = f" 👉 <a href='https://www.wildberries.ru/catalog/{digits}/detail.aspx'>Посмотреть на WB</a>" if digits else ""
-                    new_analysis_lines.append(f"✅ Артикул: {art_val}{wb_link}")
+                    new_analysis_lines.append(f"✅ Артикул: {art_raw}{wb_link}")
                 else:
                     new_analysis_lines.append(line)
 
-            # Чистим имя файла от запрещенных символов
-            file_prefix = re.sub(r'[\\/*?:"<>|]', '', file_prefix).replace(' ', '')
-            if not file_prefix or file_prefix == "➖": file_prefix = "Product"
+            # ЖЕСТКОЕ ФОРМИРОВАНИЕ ИМЕНИ ФАЙЛА (Python сам собирает имя)
+            clean_cn = re.sub(r'[\\/*?:"<>|\s]', '', name_cn) # удаляем пробелы
+            clean_en = re.sub(r'[\\/*?:"<>|\s]', '', name_en)
+            clean_art = re.sub(r'[\\/*?:"<>|\s]', '', art_val)
             
-            current_file_name = f"{file_prefix}_{barcode}.pdf"
+            if not clean_cn: clean_cn = "Product"
+            if not clean_en: clean_en = "Item"
+            if not clean_art: clean_art = "NoArt"
+            
+            # Идеальный формат: Китайский_Английский_Артикул_Штрихкод.pdf
+            current_file_name = f"{clean_cn}_{clean_en}_{clean_art}_{barcode}.pdf"
             if i == 0: first_file_name = current_file_name
             
             clean_text = "\n".join(new_analysis_lines).strip()
