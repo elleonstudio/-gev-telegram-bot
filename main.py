@@ -6,7 +6,7 @@ import aiohttp
 from io import BytesIO
 from datetime import datetime
 
-from telegram import Update, BotCommand, InlineKeyboardButton, InlineKeyboardMarkup, InputFile
+from telegram import Update, BotCommand, InlineKeyboardButton, InlineKeyboardMarkup, InputFile, ReplyKeyboardRemove
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes, CallbackQueryHandler
 from pdf2image import convert_from_bytes
 from PIL import Image
@@ -24,7 +24,7 @@ AIRTABLE_TOKEN = "pati6TFqzPlZaI08o.88a1e98775f215fb08b58c2fde28b38acebc5f4556c8
 AIRTABLE_BASE_ID = "appRIlSL63Kxh6iWX"
 
 SYSTEM_MSG_DETAILED = (
-    "Ты эксперт по складской логистике. Разори текст этикетки.\n"
+    "Ты эксперт по складской логистике. Разбери текст этикетки.\n"
     "Ответ строго по шаблону:\n"
     "✅ Артикул: [артикул]\n"
     "📝 Детали с этикетки:\n"
@@ -38,8 +38,7 @@ SYSTEM_MSG_DETAILED = (
     "ФАЙЛ: [中文_English_Артикул]"
 )
 
-# --- УТИЛИТЫ ---
-
+# --- ПРОВЕРКА ШТРИХ-КОДА ---
 def is_ean13_valid(code: str) -> bool:
     if not code or len(code) != 13 or not code.isdigit(): return False
     digits = [int(d) for d in code]
@@ -48,6 +47,7 @@ def is_ean13_valid(code: str) -> bool:
     check_digit = (10 - ((even_sum + odd_sum) % 10)) % 10
     return check_digit == digits[12]
 
+# --- РАБОТА С AI ---
 async def ask_kimi(prompt: str, image_b64: str = None, system_msg: str = "Ты ассистент.") -> str:
     headers = {'Authorization': f'Bearer {KIMI_API_KEY}', 'Content-Type': 'application/json'}
     model = 'moonshot-v1-8k-vision-preview' if image_b64 else 'moonshot-v1-8k'
@@ -56,14 +56,15 @@ async def ask_kimi(prompt: str, image_b64: str = None, system_msg: str = "Ты �
     try:
         async with aiohttp.ClientSession() as session:
             async with session.post('https://api.moonshot.cn/v1/chat/completions', 
-                                     headers=headers, json={'model': model, 'messages': [{'role': 'system', 'content': system_msg}, {'role': 'user', 'content': content}], 'temperature': 0.0}) as resp:
+                headers=headers, json={'model': model, 'messages': [{'role': 'system', 'content': system_msg}, {'role': 'user', 'content': content}], 'temperature': 0.0}, timeout=30) as resp:
                 if resp.status == 200:
                     res = await resp.json()
                     return res['choices'][0]['message']['content']
-        return "Error"
-    except: return "Error"
+        return "Error_API"
+    except: return "Error_Timeout"
 
-async def process_single_image(img_pil):
+# --- ОБРАБОТКА ИЗОБРАЖЕНИЙ ---
+async def process_image(img_pil):
     barcode, ocr_text = "➖", ""
     try:
         codes = decode(img_pil.convert('L'))
@@ -73,7 +74,6 @@ async def process_single_image(img_pil):
         ocr_text = pytesseract.image_to_string(img_pil, lang='rus+eng+chi_sim', config='--oem 3 --psm 6')
     except: pass
     
-    # Конвертация для Kimi
     img_byte_arr = BytesIO()
     img_pil.convert('RGB').save(img_byte_arr, format='JPEG')
     b64 = base64.b64encode(img_byte_arr.getvalue()).decode('utf-8')
@@ -81,17 +81,20 @@ async def process_single_image(img_pil):
     analysis = await ask_kimi(f"Этикетка: {ocr_text}", image_b64=b64, system_msg=SYSTEM_MSG_DETAILED)
     return barcode, analysis
 
-# --- ОБРАБОТЧИКИ ---
+# --- ОБРАБОТЧИКИ КОМАНД ---
+async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("🚫 Операция прервана. Очередь очищена.", reply_markup=ReplyKeyboardRemove())
+    context.user_data.clear()
 
 async def show_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = "<b>📂 GS Assistant: Главное меню</b>\n\nВыбери нужную функцию:"
-    kb = [[InlineKeyboardButton("📖 Руководство", callback_data='help')],
-          [InlineKeyboardButton("📊 Статус Airtable", callback_data='status')]]
+    kb = [[InlineKeyboardButton("📖 Руководство", callback_data='help')]]
     await update.message.reply_text(text, reply_markup=InlineKeyboardMarkup(kb), parse_mode='HTML')
 
+# --- ОБРАБОТЧИК МЕДИА ---
 async def handle_media(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    status_msg = await update.message.reply_text("⏳ Начинаю обработку...")
     try:
-        msg = await update.message.reply_text("⏳ Начинаю обработку...")
         file_id = update.message.photo[-1].file_id if update.message.photo else update.message.document.file_id
         tg_file = await context.bot.get_file(file_id)
         buf = BytesIO()
@@ -104,77 +107,57 @@ async def handle_media(update: Update, context: ContextTypes.DEFAULT_TYPE):
         else:
             images = [Image.open(buf)]
 
-        await msg.edit_text(f"📦 <b>Страниц в файле: {len(images)}</b>\n⏳ Обрабатываю данные...", parse_mode='HTML')
+        await status_msg.edit_text(f"📦 <b>Страниц: {len(images)}</b>\n⏳ Обрабатываю...", parse_mode='HTML')
 
-        all_reports = []
-        final_file_name = "document.pdf"
+        reports = []
+        first_file_name = "Product.pdf"
 
         for i, img in enumerate(images):
-            barcode, analysis = await process_single_image(img)
-            
-            # Валидация EAN
-            ean_status = "(EAN-13 верен)" if is_ean13_valid(barcode) else "(Читается)"
-            if barcode == "➖": ean_status = ""
+            barcode, analysis = await process_image(img)
+            ean_info = "(EAN-13 верен)" if is_ean13_valid(barcode) else "(Читается)"
+            if barcode == "➖": ean_info = ""
 
-            # Ссылка WB
+            # WB Link
             wb_link = ""
             art_match = re.search(r'Артикул:\s*([^\n🔸]+)', analysis)
             if art_match:
-                art_val = art_match.group(1).strip().replace('➖', '')
-                digits = re.sub(r'\D', '', art_val)
+                digits = re.sub(r'\D', '', art_match.group(1))
                 if digits: wb_link = f" 👉 <a href='https://www.wildberries.ru/catalog/{digits}/detail.aspx'>Посмотреть на WB</a>"
 
-            # Имя файла из первой страницы
             if i == 0:
                 name_match = re.search(r'ФАЙЛ:\s*(\S+)', analysis)
-                prefix = name_match.group(1) if name_match else "Product"
-                final_file_name = f"{prefix}_{barcode}.pdf"
+                first_file_name = f"{name_match.group(1) if name_match else 'Product'}_{barcode}.pdf"
 
             clean_analysis = analysis.split('ФАЙЛ:')[0].strip()
-            report = f"📄 <b>Страница {i+1}:</b>\n✅ Штрих-код: <code>{barcode}</code> {ean_status}\n{clean_analysis}{wb_link}"
-            all_reports.append(report)
+            reports.append(f"📄 <b>Стр {i+1}:</b>\n✅ Штрих-код: <code>{barcode}</code> {ean_info}\n{clean_analysis}{wb_link}")
 
-        # Отправка отчета
-        await update.message.reply_text("\n\n---\n\n".join(all_reports), parse_mode='HTML', disable_web_page_preview=True)
+        await update.message.reply_text("\n\n---\n\n".join(reports), parse_mode='HTML', disable_web_page_preview=True)
 
-        # Отправка файла
         buf.seek(0)
+        # Отправка файла
         if not (update.message.document and update.message.document.mime_type == 'application/pdf'):
             pdf_buf = BytesIO()
             images[0].convert('RGB').save(pdf_buf, format='PDF')
             pdf_buf.seek(0)
-            await update.message.reply_document(document=pdf_buf, filename=final_file_name)
+            await update.message.reply_document(document=pdf_buf, filename=first_file_name)
         else:
-            await update.message.reply_document(document=buf, filename=final_file_name)
-            
-        await msg.delete()
-
+            await update.message.reply_document(document=buf, filename=first_file_name)
+        
+        await status_msg.delete()
     except Exception as e:
-        logger.error(f"Media Error: {e}")
-        await update.message.reply_text("❌ Ошибка при обработке файла.")
-
-async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    text = update.message.text
-    if text.startswith('/paste'):
-        raw = text.replace('/paste', '').strip()
-        res = await ask_kimi(raw, system_msg="Ты конвертер заказов в /calc. Курс 58/55.")
-        await update.message.reply_text(res)
-    else:
-        await update.message.reply_text(await ask_kimi(text))
+        await status_msg.edit_text(f"❌ Ошибка: {str(e)}")
 
 def main():
     app = Application.builder().token(TELEGRAM_TOKEN).build()
     
-    # КОМАНДЫ (важно - ПЕРЕД MessageHandler)
-    app.add_handler(CommandHandler("start", lambda u,c: u.message.reply_text("🤖 GS Assistant запущен!")))
+    app.add_handler(CommandHandler("start", lambda u,c: u.message.reply_text("🤖 GS Assistant Online!")))
     app.add_handler(CommandHandler("menu", show_menu))
+    app.add_handler(CommandHandler("cancel", cancel))
     
-    # МЕДИА (Фото и PDF)
     app.add_handler(MessageHandler(filters.PHOTO | filters.Document.ALL, handle_media))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, lambda u,c: u.message.reply_text("Используй /menu или пришли фото.")))
     
-    # ТЕКСТ
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
-    
+    # КЛЮЧЕВОЕ: drop_pending_updates очищает очередь при зависании
     app.run_polling(drop_pending_updates=True)
 
 if __name__ == '__main__':
