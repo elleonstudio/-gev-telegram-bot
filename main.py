@@ -26,17 +26,21 @@ AIRTABLE_BASE_ID = "appRIlSL63Kxh6iWX"
 TABLE_ORDERS = "Закупка"
 TABLE_CARGO = "Логистика Карго"
 
-# ЖЕСТКАЯ ИНСТРУКЦИЯ ДЛЯ КИТАЙСКОГО ФУЛФИЛМЕНТА И КРАСИВОГО ВЫВОДА
+# ИСПРАВЛЕННАЯ ЖЕСТКАЯ ИНСТРУКЦИЯ (Никаких русских букв в имени файла!)
 SYSTEM_MSG_NAMING = (
-    "Ты — эксперт по логистике. Твоя задача — извлечь данные с этикетки и перевести их.\n"
-    "ОТВЕТ ДОЛЖЕН БЫТЬ СТРОГО В 2 БЛОКА:\n\n"
-    "FILE: [ЦВЕТ_МАТЕРИАЛ_ТОВАР_НА_КИТАЙСКОМ]_[English_Name]_[Размер]_[Артикул]_[Штрихкод].pdf\n"
+    "Ты — переводчик и эксперт по логистике. Твоя задача: прочитать этикетку, ПЕРЕВЕСТИ суть товара на КИТАЙСКИЙ и АНГЛИЙСКИЙ, и выдать результат строго по шаблону.\n\n"
+    "ШАБЛОН ОТВЕТА (сохрани именно такой вид):\n"
+    "FILE: ИЕРОГЛИФЫ_EnglishName_Размер_Артикул_Штрихкод.pdf\n"
     "📝 Детали с этикетки:\n"
-    "🔸 Товар: [название на русском]\n"
-    "🔸 Цвет/Материал: [на русском]\n"
-    "🔸 Товар (EN): [на английском]\n"
-    "🔸 Цвет (EN): [на английском]\n\n"
-    "ВАЖНОЕ ПРАВИЛО: Строка FILE ОБЯЗАТЕЛЬНО должна начинаться с КИТАЙСКИХ иероглифов, которые четко описывают ЦВЕТ, МАТЕРИАЛ и ТИП ТОВАРА (например: 棕色虎纹套装). Это нужно для рабочих склада в Китае! ЗАПРЕЩЕНО использовать русские буквы в строке FILE. Если размера нет, ставь '-'."
+    "🔸 Товар: [Название на русском]\n"
+    "🔸 Цвет/Материал: [Цвет на русском]\n"
+    "🔸 Товар (EN): [Название на английском]\n"
+    "🔸 Цвет (EN): [Цвет на английском]\n\n"
+    "ПРАВИЛА ДЛЯ СТРОКИ FILE:\n"
+    "1. Слово 'ИЕРОГЛИФЫ' замени на ПЕРЕВОД товара и цвета НА КИТАЙСКИЙ ЯЗЫК (например: 棕色虎纹套装). ЭТО КРИТИЧЕСКИ ВАЖНО!\n"
+    "2. В строке FILE вообще не должно быть русских букв, транслита или скобок []. Только иероглифы и английский.\n"
+    "3. Если нет размера, пиши '-'.\n"
+    "Пример идеальной строки FILE: 棕色虎纹套装_BrownTigerSet_-_880002359_2049595583930.pdf"
 )
 
 # --- ФУНКЦИИ ИИ ---
@@ -157,7 +161,6 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         res_raw = await ask_kimi(prompt, image_b64=img_b64, system_msg=SYSTEM_MSG_NAMING)
         
-        # Разделяем ответ на имя файла и детали
         file_match = re.search(r'FILE:\s*([^\n]+\.pdf)', res_raw, re.IGNORECASE)
         if file_match:
             final_name = re.sub(r'[\\/*?:"<>|]', '', file_match.group(1).strip())
@@ -166,7 +169,6 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
             final_name = "label_converted.pdf"
             details = res_raw.strip()
 
-        # Ссылка на WB
         wb_link = f"👉 https://www.wildberries.ru/search?search={art}" if art and art != "-" else ""
         
         caption_text = (
@@ -201,7 +203,6 @@ async def handle_doc(update: Update, context: ContextTypes.DEFAULT_TYPE):
         prompt = f"Текст с этикетки: {ocr_text}. Артикул: {art}. Штрихкод: {barcode}."
         res_raw = await ask_kimi(prompt, image_b64=img_b64, system_msg=SYSTEM_MSG_NAMING)
         
-        # Разделяем ответ
         file_match = re.search(r'FILE:\s*([^\n]+\.pdf)', res_raw, re.IGNORECASE)
         if file_match:
             final_name = re.sub(r'[\\/*?:"<>|]', '', file_match.group(1).strip())
@@ -210,7 +211,6 @@ async def handle_doc(update: Update, context: ContextTypes.DEFAULT_TYPE):
             final_name = "label_converted.pdf"
             details = res_raw.strip()
         
-        # Ссылка на WB
         wb_link = f"👉 https://www.wildberries.ru/search?search={art}" if art and art != "-" else ""
 
         buf.seek(0)
@@ -220,8 +220,7 @@ async def handle_doc(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"📦 Страниц: 1\n"
             f"✅ Штрих-код: {barcode}\n"
             f"✅ Артикул: {art} {wb_link}\n"
-            f"{details}\n\n"
-            f"📄 Имя файла: `{final_name}`"
+            f"{details}"
         )
         
         await update.message.reply_document(
