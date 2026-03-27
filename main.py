@@ -26,17 +26,17 @@ AIRTABLE_BASE_ID = "appRIlSL63Kxh6iWX"
 TABLE_ORDERS = "Закупка"
 TABLE_CARGO = "Логистика Карго"
 
-# Обновленная инструкция: Жесткое разделение файла и текста!
+# ЖЕСТКАЯ ИНСТРУКЦИЯ ДЛЯ КИТАЙСКОГО ФУЛФИЛМЕНТА И КРАСИВОГО ВЫВОДА
 SYSTEM_MSG_NAMING = (
     "Ты — эксперт по логистике. Твоя задача — извлечь данные с этикетки и перевести их.\n"
     "ОТВЕТ ДОЛЖЕН БЫТЬ СТРОГО В 2 БЛОКА:\n\n"
-    "FILE: [КИТАЙСКИЕ_ИЕРОГЛИФЫ]_[English_Name]_[Размер]_[Артикул]_[Штрихкод].pdf\n"
+    "FILE: [ЦВЕТ_МАТЕРИАЛ_ТОВАР_НА_КИТАЙСКОМ]_[English_Name]_[Размер]_[Артикул]_[Штрихкод].pdf\n"
     "📝 Детали с этикетки:\n"
     "🔸 Товар: [название на русском]\n"
     "🔸 Цвет/Материал: [на русском]\n"
     "🔸 Товар (EN): [на английском]\n"
     "🔸 Цвет (EN): [на английском]\n\n"
-    "ВАЖНОЕ ПРАВИЛО: Строка FILE ОБЯЗАТЕЛЬНО должна начинаться с КИТАЙСКИХ иероглифов (например: 棕色虎纹套装). ЗАПРЕЩЕНО использовать русские буквы в строке FILE, чтобы рабочие в Китае не перепутали товар! Если размера нет, ставь '-'."
+    "ВАЖНОЕ ПРАВИЛО: Строка FILE ОБЯЗАТЕЛЬНО должна начинаться с КИТАЙСКИХ иероглифов, которые четко описывают ЦВЕТ, МАТЕРИАЛ и ТИП ТОВАРА (например: 棕色虎纹套装). Это нужно для рабочих склада в Китае! ЗАПРЕЩЕНО использовать русские буквы в строке FILE. Если размера нет, ставь '-'."
 )
 
 # --- ФУНКЦИИ ИИ ---
@@ -166,7 +166,7 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
             final_name = "label_converted.pdf"
             details = res_raw.strip()
 
-        # Вшиваем линку на WB прямо в код
+        # Ссылка на WB
         wb_link = f"👉 https://www.wildberries.ru/search?search={art}" if art and art != "-" else ""
         
         caption_text = (
@@ -177,7 +177,7 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         await msg.edit_text(caption_text)
 
-# ОБРАБОТКА PDF (ДОКУМЕНТЫ)
+# ОБРАБОТКА PDF
 async def handle_doc(update: Update, context: ContextTypes.DEFAULT_TYPE):
     doc = update.message.document
     if not doc.file_name.lower().endswith('.pdf'):
@@ -210,7 +210,7 @@ async def handle_doc(update: Update, context: ContextTypes.DEFAULT_TYPE):
             final_name = "label_converted.pdf"
             details = res_raw.strip()
         
-        # Вшиваем линку на WB прямо в код
+        # Ссылка на WB
         wb_link = f"👉 https://www.wildberries.ru/search?search={art}" if art and art != "-" else ""
 
         buf.seek(0)
@@ -220,7 +220,8 @@ async def handle_doc(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"📦 Страниц: 1\n"
             f"✅ Штрих-код: {barcode}\n"
             f"✅ Артикул: {art} {wb_link}\n"
-            f"{details}"
+            f"{details}\n\n"
+            f"📄 Имя файла: `{final_name}`"
         )
         
         await update.message.reply_document(
