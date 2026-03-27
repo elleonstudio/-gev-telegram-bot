@@ -6,7 +6,7 @@ import aiohttp
 from io import BytesIO
 from datetime import datetime
 
-from telegram import Update, InputFile, BotCommand, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import Update, BotCommand, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes, CallbackQueryHandler
 from pdf2image import convert_from_bytes
 from PIL import Image
@@ -23,141 +23,60 @@ KIMI_API_KEY = os.getenv('KIMI_API_KEY')
 AIRTABLE_TOKEN = "pati6TFqzPlZaI08o.88a1e98775f215fb08b58c2fde28b38acebc5f4556c8eb850b9ca9930dbcf607"
 AIRTABLE_BASE_ID = "appRIlSL63Kxh6iWX"
 
-TABLE_ORDERS = "Закупка"
-TABLE_CARGO = "Логистика Карго"
+SYSTEM_MSG_DETAILED = (
+    "Ты эксперт по складской логистике. Твоя задача — разобрать текст с этикетки товара.\n"
+    "Выдай ответ строго по шаблону:\n"
+    "✅ Артикул: [артикул]\n"
+    "📝 Детали с этикетки:\n"
+    "🔸 Товар: [что это]\n"
+    "🔸 Цвет: [цвет]\n"
+    "🔸 Размер: [размер или ➖]\n"
+    "🔸 Материал: [материал или ➖]\n"
+    "🔸 Дата: [дата или ➖]\n\n"
+    "ФАЙЛ: [中文_English_Артикул]"
+)
 
-SYSTEM_MSG_NAMING = "Ты ассистент по именам файлов. Формат: 中文_English_Размер_Артикул_Штрихкод.pdf. Перевод обязателен."
-
-# --- ФУНКЦИИ ОБРАБОТКИ ---
+# --- ФУНКЦИИ ---
 
 async def ask_kimi(prompt: str, image_b64: str = None, system_msg: str = "Ты ассистент.") -> str:
     headers = {'Authorization': f'Bearer {KIMI_API_KEY}', 'Content-Type': 'application/json'}
     model = 'moonshot-v1-8k-vision-preview' if image_b64 else 'moonshot-v1-8k'
     content = [{'type': 'text', 'text': prompt}]
-    if image_b64:
-        content.append({'type': 'image_url', 'image_url': {'url': f'data:image/jpeg;base64,{image_b64}'}})
+    if image_b64: content.append({'type': 'image_url', 'image_url': {'url': f'data:image/jpeg;base64,{image_b64}'}})
     messages = [{'role': 'system', 'content': system_msg}, {'role': 'user', 'content': content}]
     try:
         async with aiohttp.ClientSession() as session:
-            async with session.post('https://api.moonshot.cn/v1/chat/completions', 
-                                     headers=headers, json={'model': model, 'messages': messages, 'temperature': 0.0}, timeout=20) as resp:
+            async with session.post('https://api.moonshot.cn/v1/chat/completions', headers=headers, json={'model': model, 'messages': messages, 'temperature': 0.0}) as resp:
                 if resp.status == 200:
                     res = await resp.json()
                     return res['choices'][0]['message']['content']
-                return f"Error_{resp.status}"
-    except Exception as e:
-        return f"Error_Timeout"
+                return "Error"
+    except: return "Error"
 
 async def extract_image_data(image: Image.Image):
-    barcode_num, text, article = "", "", ""
+    barcode, text, art = "➖", "", "➖"
     try:
         codes = decode(image.convert('L'))
-        if codes: barcode_num = codes[0].data.decode('utf-8')
+        if codes: barcode = codes[0].data.decode('utf-8')
     except: pass
-    try:
-        text = pytesseract.image_to_string(image, lang='rus+eng+chi_sim', config=r'--oem 3 --psm 6')
+    try: text = pytesseract.image_to_string(image, lang='rus+eng+chi_sim', config='--oem 3 --psm 6')
     except: pass
-    for pattern in [r'Артикул[:\s]+(\d+)', r'Артикул[:\s]*(\d+)', r'Article[:\s]+(\d+)']:
-        match = re.search(pattern, text, re.IGNORECASE)
-        if match: article = match.group(1); break
-    return barcode_num, text, article
+    match = re.search(r'Артикул[:\s]*(\S+)', text, re.IGNORECASE)
+    if match: art = match.group(1)
+    return barcode, text, art
 
-async def write_to_airtable(data: dict):
-    try:
-        api = Api(AIRTABLE_TOKEN)
-        def fmt_date(d):
-            try: return datetime.strptime(d, "%d.%m.%Y").strftime("%Y-%m-%d")
-            except: return datetime.now().strftime("%Y-%m-%d")
-
-        if "Invoice_ID" in data:
-            table = api.table(AIRTABLE_BASE_ID, TABLE_ORDERS)
-            full_id = data.get("Invoice_ID", "")
-            client_match = re.match(r'^([a-zA-Z]+)', full_id)
-            client_name = client_match.group(1).capitalize() if client_match else ""
-            record = {
-                "Код Карго": full_id, "Клиент": client_name, "Дата": fmt_date(data.get("Date")),
-                "Сумма (¥)": float(data.get("Sum_Client_CNY", 0)), "Реал Цена Закупки (¥)": float(data.get("Real_Purchase_CNY", 0)),
-                "Курс Клиент": float(data.get("Client_Rate", 58)), "Курс Реал": float(data.get("Real_Rate", 55)),
-                "Расход материалов (¥)": float(data.get("China_Logistics_CNY", 0)), "Кол-во коробок": int(data.get("FF_Boxes_Qty", 0))
-            }
-            table.create(record, typecast=True)
-            return f"✅ Выкуп для {client_name} добавлен!"
-
-        elif "Party_ID" in data:
-            table = api.table(AIRTABLE_BASE_ID, TABLE_CARGO)
-            record = {
-                "Party_ID": data.get("Party_ID"), "Date": fmt_date(data.get("Date")),
-                "Total_Weight_KG": float(data.get("Total_Weight_KG", 0)), "Total_Volume_CBM": float(data.get("Total_Volume_CBM", 0)),
-                "Total_Pieces": int(data.get("Total_Pieces", 0)), "Density": int(data.get("Density", 0)),
-                "Packaging_Type": data.get("Packaging_Type", "Сборная"), "Tariff_Cargo_USD": float(data.get("Tariff_Cargo_USD", 0)),
-                "Tariff_Client_USD": float(data.get("Tariff_Client_USD", 0)), "Rate_USD_CNY": float(data.get("Rate_USD_CNY", 0)),
-                "Rate_USD_AMD": float(data.get("Rate_USD_AMD", 0)), "Total_Client_AMD": int(data.get("Total_Client_AMD", 0)),
-                "Total_Cargo_CNY": int(data.get("Total_Cargo_CNY", 0)), "Net_Profit_AMD": int(data.get("Net_Profit_AMD", 0)),
-                "Logistics_Status": "Выполнен"
-            }
-            table.create(record, typecast=True)
-            return f"✅ Партия {data.get('Party_ID')} успешно добавлена!"
-    except Exception as e:
-        return f"❌ Ошибка Airtable: {str(e)}"
-    return "❌ Ошибка формата."
-
-# --- ОБРАБОТЧИКИ ---
-
-async def show_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    text = "<b>📂 GS Assistant: Главное меню</b>\n\nИспользуй кнопки для управления."
-    keyboard = [[InlineKeyboardButton("📖 Руководство", callback_data='open_guide')],
-                [InlineKeyboardButton("📊 Статус Airtable", callback_data='check_airtable')]]
-    await update.message.reply_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='HTML')
-
-async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    if query.data == 'open_guide':
-        guide = (
-            "<b>📖 Инструкция:</b>\n"
-            "1. <code>/paste</code> — Конвертер заказов.\n"
-            "2. <code>/1688</code> — Поставщики по фото.\n"
-            "3. <code>/hs</code> — Коды ТН ВЭД.\n"
-            "4. <b>Фото/PDF</b> — Штрих-коды и OCR.\n"
-            "5. <b>AIRTABLE_EXPORT</b> — Авто-учет."
-        )
-        await query.edit_message_text(guide, parse_mode='HTML')
-    elif query.data == 'check_airtable':
-        await query.edit_message_text(f"📊 <b>Статус:</b> 🟢 Подключено\nТаблицы: {TABLE_ORDERS}, {TABLE_CARGO}", parse_mode='HTML')
-
-async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    text = update.message.text
-    if not text or text.strip().startswith('/calc'): return
-
-    if text.startswith('/paste'):
-        raw = text.replace('/paste', '').strip()
-        msg = await update.message.reply_text("⏳...")
-        res = await ask_kimi(f"Шаблон /calc для: {raw}", system_msg="Ты конвертер. Курс 58/55. Начни ответ с /calc")
-        await msg.edit_text(res)
-        return
-
-    if "AIRTABLE_EXPORT_START" in text:
-        match = re.search(r'AIRTABLE_EXPORT_START(.*?)AIRTABLE_EXPORT_END', text, re.DOTALL)
-        if match:
-            lines = match.group(1).strip().split('\n')
-            data = {l.split(':', 1)[0].strip(): l.split(':', 1)[1].strip() for l in lines if ':' in l}
-            await update.message.reply_text(await write_to_airtable(data))
-        return
-
-    await update.message.reply_text(await ask_kimi(text))
+# --- ОБРАБОТЧИК МЕДИА ---
 
 async def handle_media(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         is_pdf = False
-        if update.message.photo:
-            file_id = update.message.photo[-1].file_id
+        if update.message.photo: file_id = update.message.photo[-1].file_id
         elif update.message.document:
             file_id = update.message.document.file_id
             if update.message.document.mime_type == 'application/pdf': is_pdf = True
         else: return
 
-        caption = update.message.caption or ""
-        msg = await update.message.reply_text("⏳ Обработка...")
+        msg = await update.message.reply_text("⏳ Анализирую этикетку...")
         file = await context.bot.get_file(file_id)
         buf = BytesIO()
         await file.download_to_memory(buf)
@@ -166,42 +85,58 @@ async def handle_media(update: Update, context: ContextTypes.DEFAULT_TYPE):
             buf.seek(0)
             images = convert_from_bytes(buf.read(), dpi=200, first_page=1, last_page=1)
             img = images[0]
-        else:
-            img = Image.open(buf)
+        else: img = Image.open(buf)
 
         img_b64 = base64.b64encode(buf.getvalue()).decode('utf-8')
-        barcode, ocr_text, art = await extract_image_data(img)
+        barcode, ocr_raw, art_simple = await extract_image_data(img)
 
-        if caption.startswith('/1688'):
-            res = await ask_kimi("Supplier Info", image_b64=img_b64, system_msg="1688 Expert")
-            await msg.edit_text(res)
-        elif caption.startswith('/hs'):
-            res = await ask_kimi("HS Codes", image_b64=img_b64, system_msg="Broker")
-            await msg.edit_text(res)
-        else:
-            # ЗАЩИТА ОТ Error_400
-            res_name = await ask_kimi(f"Naming: {ocr_text}", image_b64=img_b64, system_msg=SYSTEM_MSG_NAMING)
-            if "Error" in res_name:
-                new_name = f"Product_{art if art else barcode}.pdf"
-            else:
-                new_name = re.sub(r'[\\/*?:"<>|]', '', res_name.strip()) + ".pdf"
-            await msg.edit_text(f"📄 <code>{new_name}</code>\nBarcode: {barcode}\nArt: {art}", parse_mode='HTML')
+        # Запрос к ИИ для красивого разбора
+        analysis = await ask_kimi(f"Разбери детали этикетки: {ocr_raw}", image_b64=img_b64, system_msg=SYSTEM_MSG_DETAILED)
+        
+        # Формируем ссылку на WB если артикул найден
+        wb_link = ""
+        art_match = re.search(r'Артикул:\s*(\S+)', analysis)
+        if art_match:
+            art_val = art_match.group(1).lower().replace('➖', '')
+            if art_val and any(c.isdigit() for c in art_val):
+                wb_digits = re.sub(r'\D', '', art_val)
+                if wb_digits: wb_link = f" 👉 <a href='https://www.wildberries.ru/catalog/{wb_digits}/detail.aspx'>Посмотреть на WB</a>"
+
+        # Формируем финальное имя файла
+        file_name_part = "Product"
+        name_match = re.search(r'ФАЙЛ:\s*(\S+)', analysis)
+        if name_match: file_name_part = name_match.group(1)
+        final_file_name = f"{file_name_part}_{barcode}.pdf"
+
+        # Собираем красивый ответ
+        clean_analysis = analysis.split('ФАЙЛ:')[0].strip()
+        final_text = (
+            f"✅ <b>Штрих-код:</b> <code>{barcode}</code> (Читается)\n"
+            f"{clean_analysis}{wb_link}\n\n"
+            f"📄 <code>{final_file_name}</code>"
+        )
+
+        await msg.edit_text(final_text, parse_mode='HTML', disable_web_page_preview=True)
+
     except Exception as e:
-        logger.error(f"Media error: {e}")
+        logger.error(f"Error: {e}")
+
+# --- ОСТАЛЬНЫЕ ОБРАБОТЧИКИ ---
+
+async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = update.message.text
+    if not text or text.startswith('/calc'): return
+    if text.startswith('/paste'):
+        msg = await update.message.reply_text("⏳ Формирую шаблон...")
+        res = await ask_kimi(text, system_msg="Ты конвертер заказов в шаблон /calc. Курс 58/55.")
+        await msg.edit_text(res)
+    else: await update.message.reply_text(await ask_kimi(text))
 
 def main():
     app = Application.builder().token(TELEGRAM_TOKEN).build()
     app.add_handler(CommandHandler("start", lambda u, c: u.message.reply_text("🤖 GS Assistant Online!")))
-    app.add_handler(CommandHandler("menu", show_menu))
-    app.add_handler(CallbackQueryHandler(button_callback))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
     app.add_handler(MessageHandler(filters.PHOTO | filters.Document.ALL, handle_media))
-    
-    async def set_cmds(application):
-        await application.bot.set_my_commands([BotCommand("menu", "Открыть меню"), BotCommand("start", "Старт")])
-    
-    app.post_init = set_cmds
-    # drop_pending_updates=True спасает от ошибок Conflict 409
     app.run_polling(drop_pending_updates=True)
 
 if __name__ == '__main__':
