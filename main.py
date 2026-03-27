@@ -14,7 +14,7 @@ import pytesseract
 from pyzbar.pyzbar import decode
 from pyairtable import Api
 
-# --- ЛОГИРОВАНИЕ ---
+# --- НАСТРОЙКИ ---
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
 logger = logging.getLogger(__name__)
 
@@ -28,7 +28,7 @@ TABLE_CARGO = "Логистика Карго"
 
 SYSTEM_MSG_NAMING = "Ты ассистент по именам файлов. Формат: 中文_English_Размер_Артикул_Штрихкод.pdf. Перевод обязателен."
 
-# --- ФУНКЦИИ ---
+# --- ФУНКЦИИ ОБРАБОТКИ (OCR, Штрих-коды, ИИ) ---
 
 async def ask_kimi(prompt: str, image_b64: str = None, system_msg: str = "Ты ассистент.") -> str:
     headers = {'Authorization': f'Bearer {KIMI_API_KEY}', 'Content-Type': 'application/json'}
@@ -93,15 +93,15 @@ async def write_to_airtable(data: dict):
                 "Logistics_Status": "Выполнен"
             }
             table.create(record, typecast=True)
-            return f"✅ Партия {data.get('Party_ID')} добавлена!"
+            return f"✅ Партия {data.get('Party_ID')} успешно добавлена в Логистику!"
     except Exception as e:
         return f"❌ Ошибка Airtable: {str(e)}"
-    return "❌ Неизвестный формат данных."
+    return "❌ Ошибка: Тип данных не определен."
 
 # --- ОБРАБОТЧИКИ ---
 
 async def show_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    text = "<b>📂 GS Assistant: Главное меню</b>\n\nВыбери нужную функцию или нажми на Руководство."
+    text = "<b>📂 GS Assistant: Главное меню</b>\n\nНажми кнопку ниже для открытия подробного руководства."
     keyboard = [[InlineKeyboardButton("📖 Открыть руководство", callback_data='open_guide')],
                 [InlineKeyboardButton("📊 Статус Airtable", callback_data='check_airtable')]]
     await update.message.reply_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='HTML')
@@ -110,19 +110,25 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     if query.data == 'open_guide':
-        guide = "<b>📖 Руководство:</b>\n\n1. /paste — расчеты\n2. /1688 — поставщики\n3. /hs — ТН ВЭД\n4. Фото — штрих-коды\n5. Блок START/END — Airtable"
+        guide = (
+            "<b>📖 Руководство GS Assistant:</b>\n\n"
+            "1️⃣ <b>/paste [данные]</b> — превращает твой текст в шаблон /calc.\n"
+            "2️⃣ <b>/1688 [фото]</b> — вытаскивает инфо поставщика.\n"
+            "3️⃣ <b>/hs [фото]</b> — подбирает ТН ВЭД коды.\n"
+            "4️⃣ <b>Фото/PDF (без команд)</b> — бот читает штрих-код, артикул и дает имя файлу.\n"
+            "5️⃣ <b>AIRTABLE_EXPORT</b> — автоматическая запись в базу."
+        )
         await query.edit_message_text(guide, parse_mode='HTML')
     elif query.data == 'check_airtable':
-        await query.edit_message_text(f"📊 <b>Airtable OK</b>\nТаблицы: {TABLE_ORDERS}, {TABLE_CARGO}", parse_mode='HTML')
+        await query.edit_message_text(f"📊 <b>Статус:</b> 🟢 Подключено\nТаблицы: {TABLE_ORDERS}, {TABLE_CARGO}", parse_mode='HTML')
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not update.message or not update.message.text: return
     text = update.message.text
-    if text.strip().startswith('/calc'): return
+    if not text or text.strip().startswith('/calc'): return
 
     if text.startswith('/paste'):
         raw = text.replace('/paste', '').strip()
-        msg = await update.message.reply_text("⏳...")
+        msg = await update.message.reply_text("⏳ Формирую шаблон...")
         res = await ask_kimi(f"Шаблон /calc для: {raw}", system_msg="Ты конвертер. Курс 58/55. Начало: /calc")
         await msg.edit_text(res)
         return
@@ -138,11 +144,12 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def handle_media(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
-        # ПРОВЕРКА: Фото или Документ?
+        is_pdf = False
         if update.message.photo:
             file_id = update.message.photo[-1].file_id
         elif update.message.document:
             file_id = update.message.document.file_id
+            if update.message.document.mime_type == 'application/pdf': is_pdf = True
         else: return
 
         caption = update.message.caption or ""
@@ -150,7 +157,17 @@ async def handle_media(update: Update, context: ContextTypes.DEFAULT_TYPE):
         file = await context.bot.get_file(file_id)
         buf = BytesIO()
         await file.download_to_memory(buf)
+        
+        # ЛОГИКА OCR И ШТРИХ-КОДОВ
+        if is_pdf:
+            buf.seek(0)
+            images = convert_from_bytes(buf.read(), dpi=200, first_page=1, last_page=1)
+            img = images[0]
+        else:
+            img = Image.open(buf)
+
         img_b64 = base64.b64encode(buf.getvalue()).decode('utf-8')
+        barcode, ocr_text, art = await extract_image_data(img)
 
         if caption.startswith('/1688'):
             res = await ask_kimi("Supplier Info", image_b64=img_b64, system_msg="1688 Expert")
@@ -159,23 +176,24 @@ async def handle_media(update: Update, context: ContextTypes.DEFAULT_TYPE):
             res = await ask_kimi("HS Codes", image_b64=img_b64, system_msg="Broker")
             await msg.edit_text(res)
         else:
-            # ШТРИХ-КОДЫ
-            image = Image.open(buf)
-            barcode, ocr, art = await extract_image_data(image)
-            name = await ask_kimi(f"Naming: {ocr}", image_b64=img_b64, system_msg=SYSTEM_MSG_NAMING)
-            name = re.sub(r'[\\/*?:"<>|]', '', name.strip()) + ".pdf"
-            await msg.edit_text(f"📄 <code>{name}</code>\nBarcode: {barcode}\nArt: {art}", parse_mode='HTML')
+            new_name = await ask_kimi(f"Naming: {ocr_text}", image_b64=img_b64, system_msg=SYSTEM_MSG_NAMING)
+            new_name = re.sub(r'[\\/*?:"<>|]', '', new_name.strip()) + ".pdf"
+            await msg.edit_text(f"📄 <code>{new_name}</code>\nBarcode: {barcode}\nArt: {art}", parse_mode='HTML')
     except Exception as e:
-        logger.error(f"Media error: {e}")
+        logger.error(f"Media Error: {e}")
 
 def main():
     app = Application.builder().token(TELEGRAM_TOKEN).build()
-    app.add_handler(CommandHandler("start", lambda u, c: u.message.reply_text("🤖 GS Assistant Online!")))
+    app.add_handler(CommandHandler("start", lambda u, c: u.message.reply_text("🤖 GS Assistant запущен!")))
     app.add_handler(CommandHandler("menu", show_menu))
     app.add_handler(CallbackQueryHandler(button_callback))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     app.add_handler(MessageHandler(filters.PHOTO | filters.Document.ALL, handle_media))
     
+    async def set_cmds(application):
+        await application.bot.set_my_commands([BotCommand("menu", "Меню"), BotCommand("start", "Старт")])
+    
+    app.post_init = set_cmds
     app.run_polling(drop_pending_updates=True)
 
 if __name__ == '__main__':
