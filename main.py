@@ -6,7 +6,7 @@ import aiohttp
 from io import BytesIO
 from datetime import datetime
 
-from telegram import Update, InputFile
+from telegram import Update, InputFile, BotCommand
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 from pdf2image import convert_from_bytes
 from PIL import Image
@@ -36,13 +36,10 @@ async def ask_kimi(prompt: str, image_b64: str = None, system_msg: str = "Ты �
     content = [{'type': 'text', 'text': prompt}]
     if image_b64:
         content.append({'type': 'image_url', 'image_url': {'url': f'data:image/jpeg;base64,{image_b64}'}})
-    
     messages = [{'role': 'system', 'content': system_msg}, {'role': 'user', 'content': content}]
-    
     async with aiohttp.ClientSession() as session:
         async with session.post('https://api.moonshot.cn/v1/chat/completions', 
-                                 headers=headers, 
-                                 json={'model': model, 'messages': messages, 'temperature': 0.0}) as resp:
+                                 headers=headers, json={'model': model, 'messages': messages, 'temperature': 0.0}) as resp:
             if resp.status == 200:
                 res = await resp.json()
                 return res['choices'][0]['message']['content']
@@ -74,74 +71,73 @@ def parse_airtable_block(text: str) -> dict:
 
 async def write_to_airtable(data: dict):
     api = Api(AIRTABLE_TOKEN)
-    
     def fmt_date(d):
         try: return datetime.strptime(d, "%d.%m.%Y").strftime("%Y-%m-%d")
         except: return datetime.now().strftime("%Y-%m-%d")
 
-    # ТИП 1: ВЫКУП (ORDERS)
     if "Invoice_ID" in data:
         table = api.table(AIRTABLE_BASE_ID, TABLE_ORDERS)
         full_id = data.get("Invoice_ID", "")
         client_match = re.match(r'^([a-zA-Z]+)', full_id)
         client_name = client_match.group(1).capitalize() if client_match else ""
-
         record = {
-            "Код Карго": full_id,
-            "Клиент": client_name,
-            "Дата": fmt_date(data.get("Date")),
-            "Сумма (¥)": float(data.get("Sum_Client_CNY", 0)),
-            "Реал Цена Закупки (¥)": float(data.get("Real_Purchase_CNY", 0)),
-            "Курс Клиент": float(data.get("Client_Rate", 58)),
-            "Курс Реал": float(data.get("Real_Rate", 55)),
-            "Расход материалов (¥)": float(data.get("China_Logistics_CNY", 0)),
-            "Кол-во коробок": int(data.get("FF_Boxes_Qty", 0))
+            "Код Карго": full_id, "Клиент": client_name, "Дата": fmt_date(data.get("Date")),
+            "Сумма (¥)": float(data.get("Sum_Client_CNY", 0)), "Реал Цена Закупки (¥)": float(data.get("Real_Purchase_CNY", 0)),
+            "Курс Клиент": float(data.get("Client_Rate", 58)), "Курс Реал": float(data.get("Real_Rate", 55)),
+            "Расход материалов (¥)": float(data.get("China_Logistics_CNY", 0)), "Кол-во коробок": int(data.get("FF_Boxes_Qty", 0))
         }
         table.create(record, typecast=True)
-        return f"✅ Выкуп для {client_name} добавлен!"
+        return f"✅ Выкупы: {client_name} добавлен!"
 
-    # ТИП 2: ЛОГИСТИКА КАРГО (ОБНОВЛЕНО ПОД ТВОИ СКРИНШОТЫ)
     elif "Party_ID" in data:
         table = api.table(AIRTABLE_BASE_ID, TABLE_CARGO)
         record = {
-            "Party_ID": data.get("Party_ID"),
-            "Date": fmt_date(data.get("Date")),
-            "Total_Weight_KG": float(data.get("Total_Weight_KG", 0)),
-            "Total_Volume_CBM": float(data.get("Total_Volume_CBM", 0)),
-            "Total_Pieces": int(data.get("Total_Pieces", 0)),
-            "Density": int(data.get("Density", 0)),
-            "Packaging_Type": data.get("Packaging_Type", "Сборная"),
-            "Tariff_Cargo_USD": float(data.get("Tariff_Cargo_USD", 0)),
-            "Tariff_Client_USD": float(data.get("Tariff_Client_USD", 0)),
-            "Rate_USD_CNY": float(data.get("Rate_USD_CNY", 0)),
-            "Rate_USD_AMD": float(data.get("Rate_USD_AMD", 0)),
-            "Total_Client_AMD": int(data.get("Total_Client_AMD", 0)),
-            "Total_Cargo_CNY": int(data.get("Total_Cargo_CNY", 0)),
-            "Net_Profit_AMD": int(data.get("Net_Profit_AMD", 0)),
+            "Party_ID": data.get("Party_ID"), "Date": fmt_date(data.get("Date")),
+            "Total_Weight_KG": float(data.get("Total_Weight_KG", 0)), "Total_Volume_CBM": float(data.get("Total_Volume_CBM", 0)),
+            "Total_Pieces": int(data.get("Total_Pieces", 0)), "Density": int(data.get("Density", 0)),
+            "Packaging_Type": data.get("Packaging_Type", "Сборная"), "Tariff_Cargo_USD": float(data.get("Tariff_Cargo_USD", 0)),
+            "Tariff_Client_USD": float(data.get("Tariff_Client_USD", 0)), "Rate_USD_CNY": float(data.get("Rate_USD_CNY", 0)),
+            "Rate_USD_AMD": float(data.get("Rate_USD_AMD", 0)), "Total_Client_AMD": int(data.get("Total_Client_AMD", 0)),
+            "Total_Cargo_CNY": int(data.get("Total_Cargo_CNY", 0)), "Net_Profit_AMD": int(data.get("Net_Profit_AMD", 0)),
             "Logistics_Status": "Выполнен"
         }
         table.create(record, typecast=True)
-        return f"✅ Партия {data.get('Party_ID')} добавлена в Логистику!"
-    
+        return f"✅ Карго: Партия {data.get('Party_ID')} добавлена!"
     return "❌ Ошибка: Тип данных не определен."
 
 # --- ОБРАБОТЧИКИ ---
+
+async def show_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    menu_text = (
+        "<b>📂 Меню функций GS Orders Bot:</b>\n\n"
+        "1️⃣ <b>/paste [данные]</b>\n"
+        "Превращает твой расчет в готовый шаблон для GS Orders. "
+        "Автоматически ставит курс 58/55 и не меняет твои цифры.\n\n"
+        "2️⃣ <b>/1688 [в подписи к фото]</b>\n"
+        "Извлекает инфо о поставщике: Название, Адрес, Tax ID, Телефон.\n\n"
+        "3️⃣ <b>/hs [в подписи к фото]</b>\n"
+        "Подбирает 3 кода ТН ВЭД и дает ссылки на Alta.ru.\n\n"
+        "4️⃣ <b>Отправка фото/PDF</b>\n"
+        "Бот прочитает штрих-код и переименует файл в формат: <i>Китай_Англ_Размер_Артикул.pdf</i>\n\n"
+        "5️⃣ <b>Авто-Airtable</b>\n"
+        "Просто перешли боту блок AIRTABLE_EXPORT. "
+        "Он сам поймет, куда писать: в 'Закупку' или в 'Логистику Карго'."
+    )
+    await update.message.reply_text(menu_text, parse_mode='HTML')
 
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text
     if not text: return
     if text.strip().startswith('/calc'): return
 
-    # Команда /paste
     if text.startswith('/paste'):
         raw_input = text.replace('/paste', '').strip()
         msg = await update.message.reply_text("⏳ Формирую шаблон...")
-        system_paste = "Ты конвертер. Расставь данные в шаблон /calc. Цена - 1-е число, Кол-во - после x, Доставка - после +. Курс: 58/55. Закупка: -. Начало ответа: /calc"
+        system_paste = "Ты конвертер. Расставь данные в шаблон /calc. Цена - 1-е число, Кол-во - после x, Доставка - после +. Курс: 58/55. Начало ответа: /calc"
         res = await ask_kimi(f"Данные: {raw_input}", system_msg=system_paste)
         await msg.edit_text(res.strip())
         return
 
-    # Экспорт в Airtable
     if "AIRTABLE_EXPORT_START" in text:
         data = parse_airtable_block(text)
         if data:
@@ -160,12 +156,12 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     img_b64 = base64.b64encode(buf.getvalue()).decode('utf-8')
 
     if caption.startswith('/1688'):
-        res = await ask_kimi("Supplier Info CN/EN. Tax ID, Address, Phone. Code blocks.", image_b64=img_b64, system_msg="1688 Expert.")
+        res = await ask_kimi("Supplier Info CN/EN. Code blocks.", image_b64=img_b64, system_msg="1688 Expert.")
         await update.message.reply_text(res, parse_mode='Markdown')
     elif caption.startswith('/hs'):
-        res = await ask_kimi(f"HS Code 4/6/10 digits. Info: {caption}", image_b64=img_b64, system_msg="Customs Broker.")
+        res = await ask_kimi(f"HS Code. Info: {caption}", image_b64=img_b64, system_msg="Broker.")
         codes = re.findall(r'\b\d{4,10}\b', res)
-        links = "\n\n🔍 **Alta.ru:**\n" + "\n".join([f"👉 [Код {c}](https://www.alta.ru/tnved/code/{c}/)" for c in set(codes)])
+        links = "\n\n🔍 Alta.ru:\n" + "\n".join([f"👉 [Код {c}](https://www.alta.ru/tnved/code/{c}/)" for c in set(codes)])
         await update.message.reply_text(res + links, parse_mode='Markdown', disable_web_page_preview=True)
     else:
         barcode, ocr_text, art = await extract_image_data(Image.open(buf))
@@ -175,10 +171,26 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 def main():
     app = Application.builder().token(TELEGRAM_TOKEN).build()
-    app.add_handler(CommandHandler("start", lambda u, c: u.message.reply_text("🤖 Бот запущен!")))
+    
+    # Регистрация команд для кнопки Menu
+    commands = [
+        BotCommand("start", "Запустить бота"),
+        BotCommand("menu", "Показать все функции"),
+        BotCommand("paste", "Конвертировать расчет в /calc")
+    ]
+    
+    app.add_handler(CommandHandler("start", lambda u, c: u.message.reply_text("🤖 Бот запущен! Нажми /menu, чтобы увидеть возможности.")))
+    app.add_handler(CommandHandler("menu", show_menu))
+    app.add_handler(CommandHandler("paste", handle_text)) # Позволяет использовать и как команду
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
     app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
-    app.run_polling(drop_pending_updates=True) # Очистка старых обновлений
+    
+    # Установка меню в интерфейс Telegram
+    async def set_commands(application):
+        await application.bot.set_my_commands(commands)
+    
+    app.post_init = set_commands
+    app.run_polling(drop_pending_updates=True)
 
 if __name__ == '__main__':
     main()
