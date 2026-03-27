@@ -119,8 +119,7 @@ async def write_to_airtable(data: dict):
         table.create(record, typecast=True)
         return f"✅ Партия {data.get('Party_ID')} добавлена!"
 
-    
-    return "❌ Ошибка: Тип данных не определен."
+return "❌ Ошибка: Тип данных не определен."
 
 # --- ОБРАБОТЧИКИ СООБЩЕНИЙ ---
 
