@@ -23,20 +23,20 @@ KIMI_API_KEY = os.getenv('KIMI_API_KEY')
 AIRTABLE_TOKEN = "pati6TFqzPlZaI08o.88a1e98775f215fb08b58c2fde28b38acebc5f4556c8eb850b9ca9930dbcf607"
 AIRTABLE_BASE_ID = "appRIlSL63Kxh6iWX"
 
-# Жесткая инструкция для нейросети
+# ОБНОВЛЕННАЯ ЖЕСТКАЯ ИНСТРУКЦИЯ ДЛЯ НЕЙРОСЕТИ (Без скобок, с требованием перевода)
 SYSTEM_MSG_DETAILED = (
-    "Ты эксперт по логистике. Твоя задача — разобрать этикетку.\n"
-    "СТРОГО соблюдай этот шаблон ответа, не добавляй лишнего текста:\n"
-    "✅ Артикул: [артикул или ➖]\n"
+    "Ты эксперт по логистике. Разбери этикетку строго по шаблону ниже.\n"
+    "ВНИМАНИЕ: Не используй скобки! В строке ФАЙЛ ты ОБЯЗАН сделать реальный перевод названия товара на китайский (иероглифы) и английский язык.\n\n"
+    "✅ Артикул: значение\n"
     "📝 Детали с этикетки:\n"
-    "🔸 Товар: [название товара или ➖]\n"
-    "🔸 Цвет: [цвет или ➖]\n"
-    "🔸 Размер: [размер или ➖]\n"
-    "🔸 Материал: [материал или ➖]\n"
-    "🔸 Комплект: [комплект или ➖]\n"
-    "🔸 Свойства: [свойства или ➖]\n"
-    "🔸 Дата: [дата или ➖]\n\n"
-    "ФАЙЛ: [Перевод_Товара_Китайский]_[Перевод_Товара_Английский]_[Артикул_без_пробелов]"
+    "🔸 Товар: значение\n"
+    "🔸 Цвет: значение или ➖\n"
+    "🔸 Размер: значение или ➖\n"
+    "🔸 Материал: значение или ➖\n"
+    "🔸 Комплект: значение или ➖\n"
+    "🔸 Свойства: значение или ➖\n"
+    "🔸 Дата: значение или ➖\n\n"
+    "ФАЙЛ: ПереводНаКитайский_ПереводНаАнглийский_Артикул"
 )
 
 # --- ПРОВЕРКА ШТРИХ-КОДА ---
@@ -91,11 +91,10 @@ async def show_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     kb = [[InlineKeyboardButton("📖 Руководство", callback_data='help')]]
     await update.message.reply_text(text, reply_markup=InlineKeyboardMarkup(kb), parse_mode='HTML')
 
-# --- ИДЕАЛЬНЫЙ ОБРАБОТЧИК МЕДИА ---
+# --- ОБРАБОТЧИК МЕДИА ---
 async def handle_media(update: Update, context: ContextTypes.DEFAULT_TYPE):
     status_msg = await update.message.reply_text("⏳ Начинаю обработку...")
     try:
-        # Универсально для фото и файлов без ошибки IndexError!
         if update.message.photo:
             file_id = update.message.photo[-1].file_id
         elif update.message.document:
@@ -114,7 +113,7 @@ async def handle_media(update: Update, context: ContextTypes.DEFAULT_TYPE):
         else:
             images = [Image.open(buf)]
 
-        await status_msg.edit_text(f"📦 <b>Страниц: {len(images)}</b>\n⏳ Нейросеть изучает этикетки...", parse_mode='HTML')
+        await status_msg.edit_text(f"📦 <b>Страниц: {len(images)}</b>\n⏳ Нейросеть делает перевод и изучает этикетки...", parse_mode='HTML')
 
         reports = []
         first_file_name = "Product.pdf"
@@ -124,7 +123,6 @@ async def handle_media(update: Update, context: ContextTypes.DEFAULT_TYPE):
             ean_info = "(EAN-13 верен)" if is_ean13_valid(barcode) else "(Читается)"
             if barcode == "➖": ean_info = ""
 
-            # Умный разбор ответа (добавление ссылки WB и создание имени файла)
             file_prefix = "Product"
             new_analysis_lines = []
             
@@ -169,9 +167,9 @@ async def handle_media(update: Update, context: ContextTypes.DEFAULT_TYPE):
             pdf_buf = BytesIO()
             images[0].convert('RGB').save(pdf_buf, format='PDF')
             pdf_buf.seek(0)
-            await update.message.reply_document(document=pdf_buf, filename=first_file_name)
+            await update.message.reply_document(document=pdf_buf, filename=first_file_name, caption="💾 Файл переименован и готов!")
         else:
-            await update.message.reply_document(document=buf, filename=first_file_name)
+            await update.message.reply_document(document=buf, filename=first_file_name, caption="💾 Файл переименован и готов!")
         
         await status_msg.delete()
     except Exception as e:
