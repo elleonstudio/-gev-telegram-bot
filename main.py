@@ -97,27 +97,28 @@ async def write_to_airtable(data: dict):
         table.create(record, typecast=True)
         return "✅ Данные [Выкуп] успешно добавлены в Airtable!"
 
-    # ТИП 2: ЛОГИСТИКА КАРГО
+        # ТИП 2: ЛОГИСТИКА КАРГО
     elif "Party_ID" in data:
         table = api.table(AIRTABLE_BASE_ID, TABLE_CARGO)
         record = {
             "Party_ID": data.get("Party_ID"),
-            "Дата": fmt_date(data.get("Date")),
-            "Вес (кг)": float(data.get("Total_Weight_KG", 0)),
-            "Объем (м3)": float(data.get("Total_Volume_CBM", 0)),
-            "Мест": int(data.get("Total_Pieces", 0)),
-            "Плотность": int(data.get("Density", 0)),
-            "Упаковка": data.get("Packaging_Type", "Сборная"),
-            "Тариф Карго ($)": float(data.get("Tariff_Cargo_USD", 0)),
-            "Тариф Клиент ($)": float(data.get("Tariff_Client_USD", 0)),
-            "Курс USD/CNY": float(data.get("Rate_USD_CNY", 0)),
-            "Курс USD/AMD": float(data.get("Rate_USD_AMD", 0)),
-            "Итого Клиент (AMD)": int(data.get("Total_Client_AMD", 0)),
-            "Итого Карго (CNY)": int(data.get("Total_Cargo_CNY", 0)),
-            "Прибыль (AMD)": int(data.get("Net_Profit_AMD", 0))
+            "Date": fmt_date(data.get("Date")), # Поменял "Дата" на "Date"
+            "Weight": float(data.get("Total_Weight_KG", 0)), # Упростил названия для надежности
+            "Volume": float(data.get("Total_Volume_CBM", 0)),
+            "Pieces": int(data.get("Total_Pieces", 0)),
+            "Density": int(data.get("Density", 0)),
+            "Packaging": data.get("Packaging_Type", "Сборная"),
+            "Tariff_Cargo": float(data.get("Tariff_Cargo_USD", 0)),
+            "Tariff_Client": float(data.get("Tariff_Client_USD", 0)),
+            "Rate_CNY": float(data.get("Rate_USD_CNY", 0)),
+            "Rate_AMD": float(data.get("Rate_USD_AMD", 0)),
+            "Sum_AMD": int(data.get("Total_Client_AMD", 0)),
+            "Sum_CNY": int(data.get("Total_Cargo_CNY", 0)),
+            "Profit_AMD": int(data.get("Net_Profit_AMD", 0))
         }
         table.create(record, typecast=True)
-        return "✅ Данные [Логистика] успешно добавлены в Airtable!"
+        return f"✅ Партия {data.get('Party_ID')} добавлена!"
+
     
     return "❌ Ошибка: Тип данных не определен."
 
