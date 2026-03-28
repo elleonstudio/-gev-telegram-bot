@@ -9,7 +9,7 @@ from datetime import datetime
 from telegram import Update, InputFile, BotCommand
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 from PIL import Image
-from pdf2image import convert_from_bytes  # Для чтения PDF
+from pdf2image import convert_from_bytes
 import pytesseract
 from pyzbar.pyzbar import decode
 from pyairtable import Api
@@ -18,12 +18,12 @@ from pyairtable import Api
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-TELEGRAM_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN', 'ВАШ_TELEGRAM_ТОКЕН')
-KIMI_API_KEY = os.getenv('KIMI_API_KEY', 'ВАШ_KIMI_ТОКЕН')
+TELEGRAM_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN', 'ВАШ_ТОКЕН')
+KIMI_API_KEY = os.getenv('KIMI_API_KEY', 'ВАШ_ТОКЕН_KIMI')
 AIRTABLE_TOKEN = "pati6TFqzPlZaI08o.88a1e98775f215fb08b58c2fde28b38acebc5f4556c8eb850b9ca9930dbcf607"
 AIRTABLE_BASE_ID = "appRIlSL63Kxh6iWX"
 
-# Названия таблиц из документации Baza 2026
+# Названия таблиц
 TABLE_ORDERS = "Закупка"
 TABLE_CARGO = "Логистика Карго"
 TABLE_DELIVERY = "Доставка в РФ"
@@ -59,12 +59,12 @@ async def extract_image_data(image: Image.Image):
         codes = decode(image.convert('L'))
         if codes: barcode_num = codes[0].data.decode('utf-8')
     except Exception as e:
-        logger.error(f"Ошибка чтения штрихкода: {e}")
+        pass
         
     try:
         text = pytesseract.image_to_string(image, lang='rus+eng+chi_sim', config=r'--oem 3 --psm 6')
     except Exception as e:
-        logger.error(f"Ошибка OCR: {e}")
+        pass
         
     for pattern in [r'Артикул[:\s]+(\w+)', r'Артикул[:\s]*(\w+)', r'Article[:\s]+(\w+)']:
         match = re.search(pattern, text, re.IGNORECASE)
@@ -82,7 +82,6 @@ async def write_to_airtable(data: dict, data_type: str = "EXPORT"):
         except: return datetime.now().strftime("%Y-%m-%d")
 
     try:
-        # ТИП 3: ДОСТАВКА В РФ
         if data_type == "DOSTAVKA" and "Client_ID" in data:
             table = api.table(AIRTABLE_BASE_ID, TABLE_DELIVERY)
             record = {
@@ -97,7 +96,6 @@ async def write_to_airtable(data: dict, data_type: str = "EXPORT"):
             table.create(record, typecast=True)
             return f"✅ Доставка: Расчет для {data.get('Client_ID')} успешно добавлен в базу!"
 
-        # ТИП 1 и 2: ЗАКУПКА И КАРГО
         elif data_type == "EXPORT":
             if "Invoice_ID" in data:
                 table = api.table(AIRTABLE_BASE_ID, TABLE_ORDERS)
@@ -135,17 +133,17 @@ async def write_to_airtable(data: dict, data_type: str = "EXPORT"):
                 table.create(record, typecast=True)
                 return f"✅ Карго: Партия {data.get('Party_ID')} добавлена!"
                 
-        return "❌ Ошибка: Тип данных не определен или ключи не совпадают."
+        return "❌ Ошибка: Тип данных не определен."
         
     except Exception as e:
-        logger.error(f"Airtable Record Creation Error: {e}")
         return f"❌ Ошибка записи в Airtable:\n<code>{e}</code>"
 
 # --- ОБРАБОТЧИКИ ТЕКСТА ---
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text
     if not text: return
-    if text.strip().startswith('/calc'): return
+
+    # 🔥 Блокировка /calc УДАЛЕНА. Теперь бот будет отвечать на ваши расчеты!
 
     if text.startswith('/paste'):
         raw_input = text.replace('/paste', '').strip()
@@ -155,7 +153,6 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await msg.edit_text(res.strip())
         return
 
-    # Прямой парсинг для Закупок и Карго
     if "AIRTABLE_EXPORT_START" in text:
         data = re.search(r'AIRTABLE_EXPORT_START(.*?)AIRTABLE_EXPORT_END', text, re.DOTALL)
         if data:
@@ -168,7 +165,6 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text(status)
         return
 
-    # Прямой парсинг для Доставки РФ
     if "AIRTABLE_DOSTAVKA_START" in text:
         data = re.search(r'AIRTABLE_DOSTAVKA_START(.*?)AIRTABLE_DOSTAVKA_END', text, re.DOTALL)
         if data:
@@ -181,7 +177,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text(status)
         return
 
-    # Обычное общение с ИИ
+    # Обычное общение с ИИ (Сюда попадёт ваш /calc)
     resp = await ask_kimi(text)
     await update.message.reply_text(resp[:4000])
 
@@ -189,7 +185,6 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     caption = update.message.caption or ""
     
-    # ОПРЕДЕЛЯЕМ ФОРМАТ ФАЙЛА
     is_pdf = False
     if update.message.photo:
         file_id = update.message.photo[-1].file_id
@@ -197,11 +192,9 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         doc = update.message.document
         mime = doc.mime_type or ""
         file_id = doc.file_id
-        # Проверяем, PDF ли это
         if mime == 'application/pdf' or doc.file_name.lower().endswith('.pdf'):
             is_pdf = True
         elif not mime.startswith('image/'):
-            # Если не картинка и не PDF, игнорируем
             return
     else:
         return
@@ -210,17 +203,13 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     buf = BytesIO()
     await file.download_to_memory(buf)
 
-    # --- ЛОГИКА РАСПАКОВКИ PDF ИЛИ ИЗОБРАЖЕНИЯ ---
     try:
         if is_pdf:
-            # Конвертируем первую страницу PDF в картинку
             images = convert_from_bytes(buf.getvalue())
             if not images:
                 await update.message.reply_text("❌ Ошибка: В PDF-файле нет страниц.")
                 return
-            image = images[0] # Берем первую страницу для анализа
-            
-            # Конвертируем обратно в JPEG для отправки ИИ
+            image = images[0]
             temp_buf = BytesIO()
             image.convert('RGB').save(temp_buf, format='JPEG')
             img_b64 = base64.b64encode(temp_buf.getvalue()).decode('utf-8')
@@ -228,8 +217,7 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
             image = Image.open(buf)
             img_b64 = base64.b64encode(buf.getvalue()).decode('utf-8')
     except Exception as e:
-        logger.error(f"Ошибка декодирования файла: {e}")
-        await update.message.reply_text(f"❌ Ошибка открытия файла. Если это PDF, убедитесь, что на сервере установлен `poppler-utils`.\n`{e}`", parse_mode='Markdown')
+        await update.message.reply_text(f"❌ Ошибка открытия файла.\n`{e}`", parse_mode='Markdown')
         return
 
     # 1. АНАЛИЗ ПОСТАВЩИКА (/1688)
@@ -270,14 +258,11 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 📦 **Коды ТН ВЭД:**
 
-Для товара на фотографии...
-
 1. [Код 1] - [Описание]
 2. [Код 2] - [Описание]
 3. [Код 3] - [Описание]"""
             res = await ask_kimi(prompt_hs, image_b64=img_b64, system_msg="Ты таможенный брокер.")
             
-            # Ищем коды для создания ссылок
             codes = re.findall(r'\b\d{4,10}\b', res)
             links = "\n\n🔍 **Проверить в базе Alta:**\n" + "\n".join([f"👉 [Код {c}](https://www.alta.ru/tnved/code/{c}/)" for c in set(codes)])
             
@@ -291,14 +276,16 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         try:
             barcode, ocr_text, art = await extract_image_data(image)
             
+            # 🔥 НОВЫЙ ЖЕСТКИЙ ПРОМПТ БЕЗ РУССКОГО ЯЗЫКА В ИМЕНИ ФАЙЛА
             prompt_label = f"""Текст с этикетки: {ocr_text}. Артикул: {art}. Штрихкод: {barcode}.
 Внимательно изучи текст и выдели ГЛАВНОЕ.
 
-⚠️ ПРАВИЛО: Китайская часть имени ОБЯЗАТЕЛЬНО должна содержать: Суть товара + Цвет + Материал (или название набора).
+⚠️ ПРАВИЛО 1: Имя файла (FILENAME) ДОЛЖНО БЫТЬ ТОЛЬКО НА КИТАЙСКОМ И АНГЛИЙСКОМ! Никаких русских слов в FILENAME быть не должно!
+⚠️ ПРАВИЛО 2: Китайская часть имени ОБЯЗАТЕЛЬНО должна содержать: Суть товара + Цвет + Материал (или название набора).
 
 Сформируй ответ СТРОГО по шаблону ниже:
 
-FILENAME: [Китай_ТоварЦветМатериалНабор]_[Англ_ТоварЦветМатериалНабор]_[Размер]
+FILENAME: [ChineseDescription]_[EnglishDescription]_[Size]
 ITEM_RU: [Название товара на русском]
 COLOR_RU: [Цвет и материал/набор на русском]
 ITEM_EN: [Название товара на английском]
@@ -308,7 +295,6 @@ COLOR_EN: [Цвет и материал/набор на английском]
 
             raw_res = await ask_kimi(prompt_label, image_b64=img_b64, system_msg="Ты логист китайского склада. Отвечай только по шаблону.")
 
-            # Парсинг ответа
             filename_base, item_ru, color_ru, item_en, color_en = "Товар", "-", "-", "-", "-"
             for line in raw_res.split('\n'):
                 line = line.strip()
@@ -318,19 +304,15 @@ COLOR_EN: [Цвет и материал/набор на английском]
                 elif line.startswith('ITEM_EN:'): item_en = line.replace('ITEM_EN:', '').strip()
                 elif line.startswith('COLOR_EN:'): color_en = line.replace('COLOR_EN:', '').strip()
 
-            # Создание безопасного имени файла
             final_name = f"{filename_base}_{art}_{barcode}.pdf"
             final_name = re.sub(r'[\\/*?:"<>|]', '', final_name) 
 
-            # Конвертация в финальный PDF
             pdf_buf = BytesIO()
             image.convert('RGB').save(pdf_buf, format='PDF', resolution=100.0)
             pdf_buf.seek(0)
 
-            # Безопасная HTML-ссылка на Wildberries
             wb_link = f" 👉 <a href='https://www.wildberries.ru/search?search={art}'>https://www.wildberries.ru/search?search={art}</a>" if art != "-" else ""
 
-            # Идеальный дизайн сообщения как на скриншоте (HTML)
             msg_text = (
                 f"📦 <b>Страниц:</b> 1\n"
                 f"✅ <b>Штрих-код:</b> {barcode}\n"
@@ -344,12 +326,11 @@ COLOR_EN: [Цвет и материал/набор на английском]
 
             await msg.delete()
             
-            # Отправка документа
             await context.bot.send_document(
                 chat_id=update.effective_chat.id,
                 document=InputFile(pdf_buf, filename=final_name),
                 caption=msg_text,
-                parse_mode='HTML' # <-- Решает проблему с нижними подчеркиваниями
+                parse_mode='HTML' 
             )
         except Exception as e:
             logger.error(f"Ошибка PDF: {e}")
@@ -380,7 +361,6 @@ def main():
     app.add_handler(CommandHandler("menu", show_menu))
     
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
-    # Бот ловит и картинки, и любые другие отправленные документы (включая PDF)
     app.add_handler(MessageHandler(filters.PHOTO | filters.Document.ALL, handle_photo))
     
     async def set_commands(application):
