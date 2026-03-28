@@ -143,8 +143,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text
     if not text: return
 
-    # 🔥 Блокировка /calc УДАЛЕНА. Теперь бот будет отвечать на ваши расчеты!
-
+    # 1. КОМАНДА PASTE
     if text.startswith('/paste'):
         raw_input = text.replace('/paste', '').strip()
         msg = await update.message.reply_text("⏳ Формирую шаблон...")
@@ -152,7 +151,16 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         res = await ask_kimi(f"Данные: {raw_input}", system_msg=system_paste)
         await msg.edit_text(res.strip())
         return
+        
+    # 2. КОМАНДА CALC (Теперь она отправляется в ИИ)
+    if text.startswith('/calc'):
+        msg = await update.message.reply_text("⏳ Kimi проверяет расчет...")
+        sys_calc = "Ты математик-аудитор. Пользователь прислал сырой расчет. Проверь математику (цена * кол-во + доставка = итог). Найди ошибки, исправь их и выдай четкий финальный Commercial Invoice."
+        res = await ask_kimi(text.replace('/calc', '').strip(), system_msg=sys_calc)
+        await msg.edit_text(res[:4000])
+        return
 
+    # 3. ЭКСПОРТ В AIRTABLE
     if "AIRTABLE_EXPORT_START" in text:
         data = re.search(r'AIRTABLE_EXPORT_START(.*?)AIRTABLE_EXPORT_END', text, re.DOTALL)
         if data:
@@ -177,7 +185,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text(status)
         return
 
-    # Обычное общение с ИИ (Сюда попадёт ваш /calc)
+    # Обычное общение с ИИ
     resp = await ask_kimi(text)
     await update.message.reply_text(resp[:4000])
 
@@ -276,16 +284,17 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         try:
             barcode, ocr_text, art = await extract_image_data(image)
             
-            # 🔥 НОВЫЙ ЖЕСТКИЙ ПРОМПТ БЕЗ РУССКОГО ЯЗЫКА В ИМЕНИ ФАЙЛА
+            # 🔥 ЖЕСТКИЙ ПРОМПТ ДЛЯ ПЕРЕВОДА ИМЕНИ ФАЙЛА
             prompt_label = f"""Текст с этикетки: {ocr_text}. Артикул: {art}. Штрихкод: {barcode}.
 Внимательно изучи текст и выдели ГЛАВНОЕ.
 
-⚠️ ПРАВИЛО 1: Имя файла (FILENAME) ДОЛЖНО БЫТЬ ТОЛЬКО НА КИТАЙСКОМ И АНГЛИЙСКОМ! Никаких русских слов в FILENAME быть не должно!
-⚠️ ПРАВИЛО 2: Китайская часть имени ОБЯЗАТЕЛЬНО должна содержать: Суть товара + Цвет + Материал (или название набора).
+⚠️ ПРАВИЛО 1: Имя файла (FILENAME) ДОЛЖНО БЫТЬ ИСКЛЮЧИТЕЛЬНО НА КИТАЙСКОМ И АНГЛИЙСКОМ ЯЗЫКАХ! Никаких русских слов и кириллицы в FILENAME быть не должно! Переведи все на китайский и английский.
+⚠️ ПРАВИЛО 2: Китайская часть имени ОБЯЗАТЕЛЬНО должна содержать: Суть товара + Цвет + Материал (или название набора) НА КИТАЙСКОМ.
+⚠️ ПРАВИЛО 3: Английская часть имени должна содержать то же самое НА АНГЛИЙСКОМ.
 
 Сформируй ответ СТРОГО по шаблону ниже:
 
-FILENAME: [ChineseDescription]_[EnglishDescription]_[Size]
+FILENAME: [КитайскийТоварЦветМатериал]_[EnglishItemColorMaterial]_[Размер]
 ITEM_RU: [Название товара на русском]
 COLOR_RU: [Цвет и материал/набор на русском]
 ITEM_EN: [Название товара на английском]
@@ -295,6 +304,7 @@ COLOR_EN: [Цвет и материал/набор на английском]
 
             raw_res = await ask_kimi(prompt_label, image_b64=img_b64, system_msg="Ты логист китайского склада. Отвечай только по шаблону.")
 
+            # Парсинг ответа
             filename_base, item_ru, color_ru, item_en, color_en = "Товар", "-", "-", "-", "-"
             for line in raw_res.split('\n'):
                 line = line.strip()
@@ -311,7 +321,8 @@ COLOR_EN: [Цвет и материал/набор на английском]
             image.convert('RGB').save(pdf_buf, format='PDF', resolution=100.0)
             pdf_buf.seek(0)
 
-            wb_link = f" 👉 <a href='https://www.wildberries.ru/search?search={art}'>https://www.wildberries.ru/search?search={art}</a>" if art != "-" else ""
+            # 🔥 ИСПРАВЛЕННАЯ ПРЯМАЯ ССЫЛКА НА WB (Ведет прямо в карточку товара)
+            wb_link = f" 👉 <a href='https://www.wildberries.ru/catalog/{art}/detail.aspx'>Ссылка на товар</a>" if art != "-" else ""
 
             msg_text = (
                 f"📦 <b>Страниц:</b> 1\n"
