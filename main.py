@@ -24,7 +24,7 @@ KIMI_API_KEY = os.getenv('KIMI_API_KEY')
 AIRTABLE_TOKEN = "pati6TFqzPlZaI08o.88a1e98775f215fb08b58c2fde28b38acebc5f4556c8eb850b9ca9930dbcf607"
 AIRTABLE_BASE_ID = "appRIlSL63Kxh6iWX"
 
-# --- ЛОГИКА АУДИТА (ЧИСТЫЙ PYTHON - БЕЗ ИИ) ---
+# --- ЛОГИКА АУДИТА (ЧИСТЫЙ PYTHON) ---
 
 def run_python_audit(text):
     pure_text = text.replace('/audit_gs', '').strip()
@@ -78,7 +78,7 @@ def run_python_audit(text):
         res += f"✅ Исправленный расчет:\n{final_block}"
     return res
 
-# --- ФУНКЦИИ ИИ ---
+# --- ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ---
 
 async def ask_kimi(prompt: str, image_b64: str = None, system_msg: str = "Ассистент") -> str:
     headers = {'Authorization': f'Bearer {KIMI_API_KEY}', 'Content-Type': 'application/json'}
@@ -109,46 +109,48 @@ async def extract_image_data(image: Image.Image):
 
 # --- ОБРАБОТЧИКИ ---
 
+async def show_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    menu_text = (
+        "<b>📂 Функции GS Orders:</b>\n\n"
+        "1️⃣ <b>/audit_gs [текст]</b> — Проверка математики (строгий дизайн)\n"
+        "2️⃣ <b>/paste [текст]</b> — Конвертер в шаблон /calc\n"
+        "3️⃣ <b>Фото или PDF</b> — Имя файла для склада и штрихкод\n"
+        "4️⃣ <b>/1688 [фото]</b> — Поиск поставщика\n"
+        "5️⃣ <b>/hs [фото]</b> — Коды ТН ВЭД"
+    )
+    await update.message.reply_text(menu_text, parse_mode='HTML')
+
 async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
     file = await context.bot.get_file(update.message.document.file_id)
     if not update.message.document.file_name.lower().endswith('.pdf'): return
-    
     buf = BytesIO()
     await file.download_to_memory(buf)
     buf.seek(0)
-    
     try:
         images = convert_from_bytes(buf.read(), dpi=300)
         if images:
             img = images[0]
             barcode, ocr, art = await extract_image_data(img)
-            # Тут логика Naming...
-            await update.message.reply_text(f"✅ PDF обработан. Штрихкод: {barcode}")
+            await update.message.reply_text(f"✅ PDF обработан.\nШтрихкод: <code>{barcode}</code>\nАртикул: <code>{art}</code>", parse_mode='HTML')
     except Exception as e:
         await update.message.reply_text(f"❌ Ошибка PDF: {e}")
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text
     if not text: return
-
     if text.startswith('/audit_gs'):
         await update.message.reply_text(run_python_audit(text))
-        return
-    
-    if text.startswith('/menu'):
-        await update.message.reply_text("📂 GS Orders Bot запущен.")
-        return
-
-    # Если это просто текст - отдаем в ИИ
-    resp = await ask_kimi(text)
-    await update.message.reply_text(resp[:4000])
+    elif text.startswith('/paste'):
+        await update.message.reply_text(await ask_kimi(text, system_msg="Конвертер в /calc"))
+    else:
+        await update.message.reply_text(await ask_kimi(text))
 
 def main():
     app = Application.builder().token(TELEGRAM_TOKEN).build()
-    app.add_handler(CommandHandler("menu", show_menu)) # Убедись, что show_menu определена
-    app.add_handler(MessageHandler(filters.Document.PDF, handle_document)) # ДОБАВИЛ PDF
+    app.add_handler(CommandHandler("start", lambda u, c: u.message.reply_text("🤖 Бот готов!")))
+    app.add_handler(CommandHandler("menu", show_menu)) # ТЕПЕРЬ ФУНКЦИЯ ОПРЕДЕЛЕНА ВЫШЕ
+    app.add_handler(MessageHandler(filters.Document.PDF, handle_document))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-    app.add_handler(MessageHandler(filters.PHOTO, handle_photo)) # Убедись, что handle_photo определена
     app.run_polling()
 
 if __name__ == '__main__':
