@@ -27,7 +27,6 @@ TABLE_ORDERS = "Закупка"
 TABLE_CARGO = "Логистика Карго"
 TABLE_DOSTAVKA = "Доставка в РФ"
 
-# Инструкция для китайского фулфилмента
 SYSTEM_MSG_NAMING = (
     "Ты — эксперт по логистике в Китае. Твоя задача — создать имя файла для китайского фулфилмента. "
     "Формат СТРОГО: [Описание на китайском]_[Description in English]_[Размер]_[Артикул]_[Штрихкод]. "
@@ -159,17 +158,19 @@ async def handle_paste(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     try:
         res = await ask_kimi(f"Оформи это:\n{raw_input}", system_msg=system_paste)
-        
-        # Бронебойная защита от галлюцинаций ИИ: принудительно чистим скобки вокруг calc
         res = res.replace("(calc", "/calc").replace("(/calc", "/calc")
         if res.endswith(")"):
             res = res[:-1]
-            
         await msg.edit_text(res.strip())
     except Exception as e:
         await msg.edit_text(f"❌ Ошибка ИИ: {e}")
 
-    # Airtable парсинг
+# ВОТ ФУНКЦИЯ КОТОРАЯ БЫЛА УТЕРЯНА
+async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = update.message.text
+    if not text: return
+    if text.strip().startswith('/calc'): return
+
     if "AIRTABLE_EXPORT_START" in text:
         data = parse_airtable_block(text, "AIRTABLE_EXPORT_START", "AIRTABLE_EXPORT_END")
         if data:
@@ -184,7 +185,6 @@ async def handle_paste(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text(status)
         return
 
-    # Обычное общение с ИИ
     resp = await ask_kimi(text)
     await update.message.reply_text(resp[:4000])
 
@@ -236,9 +236,7 @@ def main():
     app.add_handler(CommandHandler("start", lambda u, c: u.message.reply_text("🤖 Бот готов! Нажми /menu")))
     app.add_handler(CommandHandler("menu", show_menu))
     
-    # ВОТ ОНО: ЖЕСТКИЙ ПЕРЕХВАТ ЛЮБОГО ТЕКСТА, НАЧИНАЮЩЕГОСЯ С /paste
     app.add_handler(MessageHandler(filters.Regex(r'^/paste'), handle_paste))
-    
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
     app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
     
