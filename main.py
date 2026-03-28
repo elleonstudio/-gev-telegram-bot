@@ -121,7 +121,9 @@ async def write_to_airtable(data: dict):
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text
     if not text: return
-    if text.strip().startswith('/calc'): return
+
+    # УДАЛЕНО: if text.strip().startswith('/calc'): return
+    # Теперь бот БУДЕТ читать ваши расчеты /calc и отправлять их нейросети (Kimi) на проверку!
 
     # Команда /paste
     if text.startswith('/paste'):
@@ -132,7 +134,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await msg.edit_text(res.strip())
         return
 
-    # Airtable парсинг
+    # Airtable парсинг: ВЫКУП И ЛОГИСТИКА
     if "AIRTABLE_EXPORT_START" in text:
         data = re.search(r'AIRTABLE_EXPORT_START(.*?)AIRTABLE_EXPORT_END', text, re.DOTALL)
         if data:
@@ -145,10 +147,43 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text(status)
         return
 
-    # Обычное общение с ИИ
+    # Airtable парсинг: ДОСТАВКА ПО РФ
+    if "AIRTABLE_DOSTAVKA_START" in text:
+        data = re.search(r'AIRTABLE_DOSTAVKA_START(.*?)AIRTABLE_DOSTAVKA_END', text, re.DOTALL)
+        # Если нет END тега, берем просто весь текст после START
+        if not data:
+            raw_text = text.split("AIRTABLE_DOSTAVKA_START")[1]
+        else:
+            raw_text = data.group(1)
+            
+        parsed = {}
+        for line in raw_text.strip().split('\n'):
+            if ':' in line:
+                key, val = line.split(':', 1)
+                parsed[key.strip()] = val.strip()
+        
+        # Запись доставки (функция write_to_airtable_dostavka описана ниже)
+        status = await write_to_airtable_dostavka(parsed)
+        await update.message.reply_text(status)
+        return
+
+    async def write_to_airtable_dostavka(data: dict):
+    api = Api(AIRTABLE_TOKEN)
+    TABLE_DOSTAVKA = "Доставка РФ" # Укажите точное название вашей таблицы в базе!
+    
+    try:
+        table = api.table(AIRTABLE_BASE_ID, TABLE_DOSTAVKA)
+        # Airtable автоматически создаст запись с теми ключами, которые вы передали в тексте
+        table.create(data, typecast=True)
+        return f"✅ Доставка по РФ: Данные успешно добавлены в базу!"
+    except Exception as e:
+        logger.error(f"Ошибка Airtable Доставка: {e}")
+        return f"❌ Ошибка добавления доставки: проверьте названия полей. ({e})"
+
+    # Обычное общение с ИИ (включая аудит шаблона /calc)
     resp = await ask_kimi(text)
     await update.message.reply_text(resp[:4000])
-
+    
 # --- ОБРАБОТЧИКИ ФОТО ---
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     caption = update.message.caption or ""
