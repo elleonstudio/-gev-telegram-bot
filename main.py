@@ -25,7 +25,7 @@ AIRTABLE_BASE_ID = "appRIlSL63Kxh6iWX"
 
 TABLE_ORDERS = "Закупка"
 TABLE_CARGO = "Логистика Карго"
-TABLE_DOSTAVKA = "Доставка в РФ" # НОВАЯ ТАБЛИЦА
+TABLE_DOSTAVKA = "Доставка в РФ"
 
 # Инструкция для китайского фулфилмента
 SYSTEM_MSG_NAMING = (
@@ -85,7 +85,6 @@ async def write_to_airtable(data: dict):
         try: return datetime.strptime(d, "%d.%m.%Y").strftime("%Y-%m-%d")
         except: return datetime.now().strftime("%Y-%m-%d")
 
-    # ТИП 1: ВЫКУП
     if "Invoice_ID" in data:
         table = api.table(AIRTABLE_BASE_ID, TABLE_ORDERS)
         full_id = data.get("Invoice_ID", "")
@@ -100,7 +99,6 @@ async def write_to_airtable(data: dict):
         table.create(record, typecast=True)
         return f"✅ Выкупы: Заказ {full_id} для {client_name} добавлен!"
 
-    # ТИП 2: ЛОГИСТИКА КАРГО
     elif "Party_ID" in data:
         table = api.table(AIRTABLE_BASE_ID, TABLE_CARGO)
         record = {
@@ -116,7 +114,6 @@ async def write_to_airtable(data: dict):
         table.create(record, typecast=True)
         return f"✅ Карго: Партия {data.get('Party_ID')} добавлена!"
 
-    # ТИП 3: ДОСТАВКА В РФ (НОВОЕ)
     elif "Client_ID" in data and "Logistics_RUB" in data:
         table = api.table(AIRTABLE_BASE_ID, TABLE_DOSTAVKA)
         record = {
@@ -131,25 +128,38 @@ async def write_to_airtable(data: dict):
         table.create(record, typecast=True)
         return f"✅ Доставка РФ: Расчет для {data.get('Client_ID')} добавлен!"
 
-    return "❌ Ошибка: Тип данных не определен (нет Invoice_ID, Party_ID или Client_ID)."
+    return "❌ Ошибка: Тип данных не определен."
 
 # --- ОБРАБОТЧИКИ ---
+
+async def handle_paste(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # ЖЕСТКИЙ ПЕРЕХВАТ КОМАНДЫ /paste
+    text = update.message.text
+    raw_input = text.replace('/paste', '').strip()
+    
+    if not raw_input:
+        await update.message.reply_text("Отправь данные после команды /paste")
+        return
+
+    msg = await update.message.reply_text("⏳ Формирую шаблон...")
+    
+    system_paste = (
+        "Ты технический конвертер. Расставь данные в шаблон /calc. "
+        "Цена - 1-е число, Кол-во - после x, Доставка - после +. "
+        "Курс клиенту: 58, Мой курс: 55. Начало ответа строго: /calc"
+    )
+    try:
+        res = await ask_kimi(f"Данные:\n{raw_input}", system_msg=system_paste)
+        await msg.edit_text(res.strip())
+    except Exception as e:
+        await msg.edit_text(f"❌ Ошибка ИИ: {e}")
 
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text
     if not text: return
     if text.strip().startswith('/calc'): return
 
-    # Команда /paste
-    if text.startswith('/paste'):
-        raw_input = text.replace('/paste', '').strip()
-        msg = await update.message.reply_text("⏳ Формирую шаблон...")
-        system_paste = "Ты конвертер. Расставь данные в шаблон /calc. Цена - 1-е число, Кол-во - после x, Доставка - после +. Курс: 58/55. Начало ответа: /calc"
-        res = await ask_kimi(f"Данные: {raw_input}", system_msg=system_paste)
-        await msg.edit_text(res.strip())
-        return
-
-    # Airtable парсинг ТИП 1 и 2 (Выкуп и Карго)
+    # Airtable парсинг
     if "AIRTABLE_EXPORT_START" in text:
         data = parse_airtable_block(text, "AIRTABLE_EXPORT_START", "AIRTABLE_EXPORT_END")
         if data:
@@ -157,7 +167,6 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text(status)
         return
 
-    # Airtable парсинг ТИП 3 (Доставка в РФ)
     if "AIRTABLE_DOSTAVKA_START" in text:
         data = parse_airtable_block(text, "AIRTABLE_DOSTAVKA_START", "AIRTABLE_DOSTAVKA_END")
         if data:
@@ -217,8 +226,8 @@ def main():
     app.add_handler(CommandHandler("start", lambda u, c: u.message.reply_text("🤖 Бот готов! Нажми /menu")))
     app.add_handler(CommandHandler("menu", show_menu))
     
-    # ВОТ ЭТА СТРОЧКА ИСПРАВЛЯЕТ МОЛЧАНИЕ:
-    app.add_handler(CommandHandler("paste", handle_text)) 
+    # ВОТ ОНО: ЖЕСТКИЙ ПЕРЕХВАТ ЛЮБОГО ТЕКСТА, НАЧИНАЮЩЕГОСЯ С /paste
+    app.add_handler(MessageHandler(filters.Regex(r'^/paste'), handle_paste))
     
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
     app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
