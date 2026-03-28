@@ -9,6 +9,7 @@ from datetime import datetime
 from telegram import Update, InputFile, BotCommand
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 from PIL import Image
+from pdf2image import convert_from_bytes  # Для чтения PDF
 import pytesseract
 from pyzbar.pyzbar import decode
 from pyairtable import Api
@@ -184,24 +185,52 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     resp = await ask_kimi(text)
     await update.message.reply_text(resp[:4000])
 
-# --- ОБРАБОТЧИКИ ФОТО И ДОКУМЕНТОВ ---
+# --- ОБРАБОТЧИКИ ФОТО И ДОКУМЕНТОВ (PDF) ---
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     caption = update.message.caption or ""
     
-    # Поддержка и фото, и документов (файлов)
+    # ОПРЕДЕЛЯЕМ ФОРМАТ ФАЙЛА
+    is_pdf = False
     if update.message.photo:
         file_id = update.message.photo[-1].file_id
     elif update.message.document:
-        file_id = update.message.document.file_id
+        doc = update.message.document
+        mime = doc.mime_type or ""
+        file_id = doc.file_id
+        # Проверяем, PDF ли это
+        if mime == 'application/pdf' or doc.file_name.lower().endswith('.pdf'):
+            is_pdf = True
+        elif not mime.startswith('image/'):
+            # Если не картинка и не PDF, игнорируем
+            return
     else:
         return
 
     file = await context.bot.get_file(file_id)
     buf = BytesIO()
     await file.download_to_memory(buf)
-    
-    img_b64 = base64.b64encode(buf.getvalue()).decode('utf-8')
-    image = Image.open(buf)
+
+    # --- ЛОГИКА РАСПАКОВКИ PDF ИЛИ ИЗОБРАЖЕНИЯ ---
+    try:
+        if is_pdf:
+            # Конвертируем первую страницу PDF в картинку
+            images = convert_from_bytes(buf.getvalue())
+            if not images:
+                await update.message.reply_text("❌ Ошибка: В PDF-файле нет страниц.")
+                return
+            image = images[0] # Берем первую страницу для анализа
+            
+            # Конвертируем обратно в JPEG для отправки ИИ
+            temp_buf = BytesIO()
+            image.convert('RGB').save(temp_buf, format='JPEG')
+            img_b64 = base64.b64encode(temp_buf.getvalue()).decode('utf-8')
+        else:
+            image = Image.open(buf)
+            img_b64 = base64.b64encode(buf.getvalue()).decode('utf-8')
+    except Exception as e:
+        logger.error(f"Ошибка декодирования файла: {e}")
+        await update.message.reply_text(f"❌ Ошибка открытия файла. Если это PDF, убедитесь, что на сервере установлен `poppler-utils`.\n`{e}`", parse_mode='Markdown')
+        return
 
     # 1. АНАЛИЗ ПОСТАВЩИКА (/1688)
     if caption.lower().startswith('/1688'):
@@ -258,7 +287,7 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # 3. ЭТИКЕТКИ, ШТРИХКОДЫ И PDF (Для склада)
     else:
-        msg = await update.message.reply_text("⏳ Читаю штрихкод и генерирую файл...")
+        msg = await update.message.reply_text("⏳ Читаю данные для этикетки...")
         try:
             barcode, ocr_text, art = await extract_image_data(image)
             
@@ -293,7 +322,7 @@ COLOR_EN: [Цвет и материал/набор на английском]
             final_name = f"{filename_base}_{art}_{barcode}.pdf"
             final_name = re.sub(r'[\\/*?:"<>|]', '', final_name) 
 
-            # Конвертация в PDF
+            # Конвертация в финальный PDF
             pdf_buf = BytesIO()
             image.convert('RGB').save(pdf_buf, format='PDF', resolution=100.0)
             pdf_buf.seek(0)
@@ -333,7 +362,7 @@ async def show_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "1️⃣ <b>/paste [данные]</b> - перенос расчета в шаблон\n"
         "2️⃣ <b>/1688 [в подписи к фото]</b> - инфо о поставщике с картинки\n"
         "3️⃣ <b>/hs [в подписи к фото]</b> - подбор 3 кодов ТН ВЭД\n"
-        "4️⃣ <b>Просто фото/файл этикетки</b> - создает PDF для склада\n"
+        "4️⃣ <b>Просто фото/PDF этикетки</b> - создает PDF для склада\n"
         "5️⃣ <b>Экспорт данных (Airtable)</b> - автоматически читает блоки <code>AIRTABLE_EXPORT_START</code> и <code>AIRTABLE_DOSTAVKA_START</code>."
     )
     await update.message.reply_text(menu_text, parse_mode='HTML')
@@ -351,8 +380,8 @@ def main():
     app.add_handler(CommandHandler("menu", show_menu))
     
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
-    # Бот ловит и картинки, и отправленные документы
-    app.add_handler(MessageHandler(filters.PHOTO | filters.Document.IMAGE, handle_photo))
+    # Бот ловит и картинки, и любые другие отправленные документы (включая PDF)
+    app.add_handler(MessageHandler(filters.PHOTO | filters.Document.ALL, handle_photo))
     
     async def set_commands(application):
         await application.bot.set_my_commands(commands)
