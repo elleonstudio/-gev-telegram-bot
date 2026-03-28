@@ -39,39 +39,91 @@ def clean_num(val):
     return str(round(val, 2))
 
 def run_python_audit(text):
-    lines = text.strip().split('\n')
-    audit_log, corrected_lines = [], []
-    total_cny, has_errors = 0, False
-    rate, commission = 58.0, 10000.0
-
-    rate_match = re.search(r'(?:курс|1¥-)\s*(\d+(?:\.\d+)?)', text.lower())
-    if rate_match: rate = float(rate_match.group(1))
+    # Убираем команду и лишние пробелы
+    pure_text = text.replace('/audit_gs', '').strip()
+    lines = pure_text.split('\n')
     
+    audit_log = []
+    corrected_lines = []
+    total_cny = 0
+    has_errors = False
+    
+    # По умолчанию параметры, если не найдены в тексте
+    rate = 58.0
+    commission = 10000.0
+
+    # 1. Сначала считаем только строки с товарами (Цена x Кол-во + Доставка)
     for line in lines:
+        if not line.strip():
+            corrected_lines.append("")
+            continue
+            
+        # Ищем паттерн классической строки закупа: [Число] × [Число] + [Число] = [Итог]
         match = re.search(r'([\d\.]+)\s*[×x*]\s*([\d\.]+)(?:\s*[\+]\s*([\d\.]+))?\s*=\s*([\d\.]+)', line.replace(',', '.'))
+        
         if match:
+            # Выделяем цифры: p (цена), q (кол-во), d (доставка), claimed (твой итог)
             p, q, d, claimed = map(float, [match.group(1), match.group(2), match.group(3) or 0, match.group(4)])
-            real = round(p * q + d, 2)
-            total_cny += real
-            if abs(real - claimed) > 0.01:
+            real_line_sum = round(p * q + d, 2)
+            
+            # Накапливаем общую сумму в юанях для финала
+            total_cny += real_line_sum
+            
+            # Проверка строки (без придирок к .0)
+            if abs(real_line_sum - claimed) > 0.1:
                 has_errors = True
-                audit_log.append(f"Было: {line.strip()}\nПравильно: {line.replace(match.group(4), clean_num(real)).strip()}")
-            corrected_lines.append(line.replace(match.group(4), clean_num(real)))
-        else: corrected_lines.append(line)
+                audit_log.append(f"Было: {line.strip()}\nПравильно: {line.replace(match.group(4), str(int(real_line_sum)) if real_line_sum.is_integer() else str(real_line_sum)).strip()}")
+                corrected_lines.append(line.replace(match.group(4), str(int(real_line_sum)) if real_line_sum.is_integer() else str(real_line_sum)))
+            else:
+                corrected_lines.append(line)
+        else:
+            # Если в строке есть курс (например, ×58) или комиссия (+10000)
+            # Извлекаем курс из текста пользователя, чтобы расчет был точным
+            found_rate = re.search(r'×(5[0-9](?:\.\d+)?)', line)
+            if found_rate: rate = float(found_rate.group(1))
+            
+            found_comm = re.search(r'\+(10000|[\d\.]+%|[\d\.]+)', line)
+            if found_comm:
+                # Если комиссия в процентах (например, +5%)
+                if '%' in found_comm.group(1):
+                    perc = float(found_comm.group(1).replace('%', ''))
+                    commission = (total_cny * rate) * (perc / 100)
+                else:
+                    commission = float(found_comm.group(1))
+            
+            corrected_lines.append(line)
 
-    final_matches = re.findall(r'=\s*(\d+)\s*֏', text)
-    claimed_final = float(final_matches[-1]) if final_matches else 0
-    real_final = round((total_cny * rate) + commission)
+    # 2. Считаем ФИНАЛ (Чистая математика Python)
+    # Формула: (Сумма CNY * Курс) + Комиссия
+    real_final_amd = round((total_cny * rate) + commission)
+    
+    # Ищем, что написал пользователь в самом конце перед знаком ֏
+    claimed_final_match = re.findall(r'=\s*(\d+)\s*֏', pure_text)
+    claimed_final = float(claimed_final_match[-1]) if claimed_final_match else 0
+    
+    final_sum_err = None
+    if abs(real_final_amd - claimed_final) > 1:
+        has_errors = True
+        final_sum_err = f"Было: {int(claimed_final)}֏\nПравильно: {int(real_final_amd)}֏"
 
-    res = f"/audit_gs\n\n{text}\n\n"
-    if not has_errors and abs(real_final - claimed_final) <= 1:
-        res += f"✅ Ошибок нет, финальная сумма {int(real_final)}֏ верна."
+    # 3. Сборка ответа по твоему дизайну
+    res = f"/audit_gs\n\n{pure_text}\n\n"
+    
+    if not has_errors:
+        res += f"✅ Ошибок нет, финальная сумма {int(real_final_amd)}֏ верна."
     else:
         res += "❌ Найдены ошибки в расчетах!\n\n"
-        if audit_log: res += "Строка:\n" + "\n\n".join(audit_log) + "\n\n"
-        if abs(real_final - claimed_final) > 1:
-            res += f"Сумма:\nБыло: {int(claimed_final)}֏\nПравильно: {int(real_final)}֏\n\nРасхождение: {abs(int(real_final - claimed_final))}֏\n\n"
-        res += f"✅ Исправленный расчет:\n" + "\n".join(corrected_lines).replace(str(int(claimed_final)), str(int(real_final)))
+        if audit_log:
+            res += "Строка:\n" + "\n\n".join(audit_log) + "\n\n"
+        if final_sum_err:
+            res += f"Сумма:\n{final_sum_err}\n\n"
+            res += f"Расхождение: {abs(int(real_final_amd - claimed_final))}֏\n\n"
+        
+        # Генерируем исправленный текст (заменяем только итог в последней строке)
+        final_block = "\n".join(corrected_lines)
+        final_block = re.sub(r'=\s*\d+\s*֏', f"= {int(real_final_amd)}֏", final_block)
+        res += f"✅ Исправленный расчет:\n{final_block}"
+    
     return res
 
 # --- ФУНКЦИИ ИИ И OCR ---
