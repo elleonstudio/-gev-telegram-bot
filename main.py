@@ -132,32 +132,98 @@ async def write_to_airtable(data: dict):
 # --- ОБРАБОТЧИКИ ---
 
 async def perform_audit(update: Update, raw_input: str):
-    msg = await update.message.reply_text("⏳ Выполняю аудит расчетов...")
-    
-    system_audit = (
-        "Ты — строгий финансовый аудитор. Твоя задача проверить расчеты пользователя и выдать ОДНО сообщение СТРОГО по шаблону ниже.\n"
-        "Пересчитай всё дважды: (Цена × Кол-во) + Доставка = Итог строки.\n\n"
-        "ОБЯЗАТЕЛЬНО соблюдай этот формат символ в символ (не пиши лишних слов):\n\n"
-        "/audit_gs\n"
-        "[Оригинальный текст пользователя 1 в 1]\n\n"
-        "❌ Найдены ошибки в расчетах! (или ✅ Ошибок нет)\n\n"
-        "Строка:\n"
-        "Было: [ошибочная строка из оригинала]\n"
-        "Правильно: [исправленная строка]\n\n"
-        "Сумма:\n"
-        "Было: [ошибочная финальная сумма пользователя]\n"
-        "Правильно: [твоя правильная сумма]\n"
-        "💸 Расхождение: [разница в драмах] ֏\n\n"
-        "✅ Исправленный расчет:\n"
-        "[Исправленный текст пользователя целиком (с правильными итогами и суммами)]\n\n"
-        "ПРАВИЛО: Если ошибок нет, пропусти блоки 'Строка', 'Сумма' и 'Расхождение', просто выведи текст пользователя и напиши '✅ Ошибок нет'."
-    )
-    
+    msg = await update.message.reply_text("⏳ Выполняю точный математический аудит...")
     try:
-        res = await ask_kimi(f"Проверь этот расчет:\n{raw_input}", system_msg=system_audit)
-        await msg.edit_text(res.strip())
+        # ПРОГРАММНЫЙ КАЛЬКУЛЯТОР (Без нейросети)
+        lines = raw_input.strip().split('\n')
+        item_pattern = re.compile(r'([\d\.]+)\s*[x×X\*]\s*([\d\.]+)\s*\+\s*([\d\.]+)\s*=\s*([\d\.]+)(.*)')
+        
+        client_name = lines[0] if lines else ""
+        items = []
+        user_yuan_sum = 0
+        rate = 58
+        user_final_amd = 0
+        extra = 10000
+        
+        for line in lines:
+            line = line.strip()
+            if not line: continue
+            
+            # Ищем товары
+            m = item_pattern.search(line)
+            if m:
+                items.append({
+                    'raw': line,
+                    'p': float(m.group(1)),
+                    'q': float(m.group(2)),
+                    's': float(m.group(3)),
+                    'total': float(m.group(4)),
+                    'name': m.group(5).strip()
+                })
+                continue
+            
+            # Ищем общую сумму и курс
+            m_sum = re.search(r'=\s*([\d\.]+)\s*[x×X\*]\s*([\d\.]+)', line)
+            if m_sum:
+                user_yuan_sum = float(m_sum.group(1))
+                rate = float(m_sum.group(2))
+                
+            # Ищем финальную сумму
+            m_final = re.search(r'=\s*([\d\.]+)\s*\+\s*([\d\.]+)\s*=\s*([\d\.]+)', line)
+            if m_final:
+                extra = float(m_final.group(2))
+                user_final_amd = float(m_final.group(3))
+        
+        if not items:
+            await msg.edit_text("❌ Не удалось распознать формат расчета.")
+            return
+
+        # Функция для красивого вывода чисел (без .0 в конце)
+        def fmt(n): return int(n) if n == int(n) else round(n, 2)
+        
+        errors_str = ""
+        corrected_lines = []
+        correct_items_sum = 0
+        
+        for item in items:
+            # ИДЕАЛЬНАЯ МАТЕМАТИКА PYTHON
+            c_total = round(item['p'] * item['q'] + item['s'], 2)
+            correct_items_sum += c_total
+            
+            correct_str = f"{fmt(item['p'])}×{fmt(item['q'])}+{fmt(item['s'])}={fmt(c_total)} {item['name']}".strip()
+            corrected_lines.append(correct_str)
+            
+            # Если ошибка больше копейки — фиксируем
+            if abs(c_total - item['total']) > 0.01:
+                errors_str += f"Было: {item['raw']}\nПравильно: {correct_str}\n\n"
+                
+        c_pre_amd = round(correct_items_sum * rate, 2)
+        c_final_amd = round(c_pre_amd + extra, 2)
+        
+        if abs(c_final_amd - user_final_amd) > 0.01 or abs(correct_items_sum - user_yuan_sum) > 0.01:
+            errors_str += f"Сумма:\nБыло: {fmt(user_final_amd)}֏\nПравильно: {fmt(c_final_amd)}֏\n\n"
+            
+        diff = abs(c_final_amd - user_final_amd)
+        
+        # ФОРМИРОВАНИЕ ОТВЕТА
+        out = f"/audit-gs\n{raw_input}\n\n"
+        if errors_str:
+            out += f"❌ Найдены ошибки в расчетах!\n\nСтрока:\n{errors_str.strip()}\n\n💸 Расхождение: {fmt(diff)} ֏\n\n"
+        else:
+            out += f"✅ Ошибок нет, финальная сумма {fmt(c_final_amd)}֏ верна.\n\n"
+            
+        # Восстанавливаем строчки с итогами
+        sum_parts = [str(fmt(round(i['p']*i['q']+i['s'], 2))) for i in items]
+        sum_line1 = f"{'+'.join(sum_parts)}={fmt(correct_items_sum)}×{fmt(rate)}="
+        sum_line2 = f"={fmt(c_pre_amd)}+{fmt(extra)}={fmt(c_final_amd)}֏"
+        
+        out += "✅ Исправленный расчет:\n"
+        out += f"{client_name}\n" + "\n".join(corrected_lines) + "\n\n"
+        out += f"{sum_line1}\n{sum_line2}"
+        
+        await msg.edit_text(out)
     except Exception as e:
-        await msg.edit_text(f"❌ Ошибка ИИ: {e}")
+        await msg.edit_text(f"❌ Системная ошибка проверки: {e}")
 
 async def handle_paste(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text
@@ -207,7 +273,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     # Игнорируем команды и вывод самого бота
     if text.strip().startswith('/calc'): return
-    if text.strip().startswith('/audit_gs'): return
+    if text.strip().startswith('/audit-gs'): return
 
     if "AIRTABLE_EXPORT_START" in text:
         data = parse_airtable_block(text, "AIRTABLE_EXPORT_START", "AIRTABLE_EXPORT_END")
@@ -223,8 +289,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text(status)
         return
 
-    # АВТОМАТИЧЕСКИЙ АУДИТ: 
-    # Если в тексте есть перемножение (x или ×), плюс (+) и равно (=)
+    # АВТОМАТИЧЕСКИЙ АУДИТ (теперь использует чистую математику Python)
     if re.search(r'\d+(\.\d+)?\s*[x×X]\s*\d+', text) and '=' in text and '+' in text and '\n' in text:
         await perform_audit(update, text)
         return
@@ -281,7 +346,6 @@ def main():
     app.add_handler(CommandHandler("menu", show_menu))
     app.add_handler(MessageHandler(filters.Regex(r'^/paste(\s|$)'), handle_paste))
     
-    # Больше нет команды /audit — она работает автоматически внутри handle_text
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
     app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
     
