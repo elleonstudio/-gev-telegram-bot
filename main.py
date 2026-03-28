@@ -258,6 +258,14 @@ COLOR_EN: [Цвет и материал/набор на английском]
 
         wb_link = f" 👉 [https://www.wildberries.ru/search?search={art}](https://www.wildberries.ru/search?search={art})" if art != "-" else ""
 
+        # Конвертация в PDF
+        pdf_buf = BytesIO()
+        image.convert('RGB').save(pdf_buf, format='PDF', resolution=100.0)
+        pdf_buf.seek(0)
+
+        # Безопасная HTML-ссылка на Wildberries
+        wb_link = f" 👉 <a href='https://www.wildberries.ru/search?search={art}'>Поиск на Wildberries</a>" if art != "-" else ""
+
         # Финальное сообщение
         msg_text = (
             f"📦 Страниц: 1\n"
@@ -272,11 +280,12 @@ COLOR_EN: [Цвет и материал/набор на английском]
 
         await msg.delete()
         
+        # Отправляем документ с parse_mode='HTML'
         await context.bot.send_document(
             chat_id=update.effective_chat.id,
             document=InputFile(pdf_buf, filename=final_name),
             caption=msg_text,
-            parse_mode='Markdown'
+            parse_mode='HTML'
         )
 
 # --- МЕНЮ И ЗАПУСК ---
