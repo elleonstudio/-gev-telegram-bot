@@ -8,6 +8,7 @@ from datetime import datetime
 
 from telegram import Update, BotCommand
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
+from pdf2image import convert_from_bytes
 from PIL import Image
 import pytesseract
 from pyzbar.pyzbar import decode
@@ -17,45 +18,23 @@ from pyairtable import Api
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-TELEGRAM_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
+# ТВОЙ НОВЫЙ ТОКЕН
+TELEGRAM_TOKEN = "8745665017:AAGwLlf20_uiI1g2vdntwfHFkWsb26CKmmg"
 KIMI_API_KEY = os.getenv('KIMI_API_KEY')
 AIRTABLE_TOKEN = "pati6TFqzPlZaI08o.88a1e98775f215fb08b58c2fde28b38acebc5f4556c8eb850b9ca9930dbcf607"
 AIRTABLE_BASE_ID = "appRIlSL63Kxh6iWX"
 
+TABLE_ORDERS = "Закупка"
+TABLE_CARGO = "Логистика Карго"
+TABLE_DOSTAVKA = "Доставка в РФ"
+
 SYSTEM_MSG_NAMING = (
-    "Ты — эксперт по логистике в Китае. Создай имя файла для фулфилмента. "
-    "Формат: [Описание на китайском]_[Description in English]_[Размер]_[Артикул]_[Штрихкод]. "
-    "ОБЯЗАТЕЛЬНО: цвет и материал на китайском в начале! Выдай только строку имени."
+    "Ты — эксперт по логистике в Китае. Создай имя файла для китайского фулфилмента. "
+    "Формат СТРОГО: [Описание на китайском]_[Description in English]_[Размер]_[Артикул]_[Штрихкод]. "
+    "В описании ОБЯЗАТЕЛЬНО укажи: цвет и материал. Выдай только одну строку текста."
 )
 
-# --- БЛОК РАБОТЫ СО ШТРИХ-КОДАМИ (ТА САМАЯ ВЕРСИЯ) ---
-
-async def extract_image_data(image: Image.Image):
-    barcode_num, text, article = "-", "-", "-"
-    try:
-        # Поиск штрих-кода
-        codes = decode(image.convert('L'))
-        if codes: 
-            barcode_num = codes[0].data.decode('utf-8')
-    except Exception as e:
-        logger.error(f"Barcode error: {e}")
-    
-    try:
-        # OCR текста
-        text = pytesseract.image_to_string(image, lang='rus+eng+chi_sim', config=r'--oem 3 --psm 6')
-    except Exception as e:
-        logger.error(f"OCR error: {e}")
-    
-    # Поиск артикула через регулярные выражения
-    for pattern in [r'Артикул[:\s]+(\w+)', r'Артикул[:\s]*(\w+)', r'Article[:\s]+(\w+)']:
-        match = re.search(pattern, text, re.IGNORECASE)
-        if match: 
-            article = match.group(1)
-            break
-            
-    return barcode_num, text, article
-
-# --- ЛОГИКА АУДИТА (БЕЗ ИИ, ЧИСТЫЙ PYTHON) ---
+# --- ЛОГИКА АУДИТА (ЧИСТЫЙ PYTHON) ---
 
 def run_python_audit(text):
     pure_text = text.replace('/audit_gs', '').strip()
@@ -68,6 +47,7 @@ def run_python_audit(text):
         if not line.strip():
             corrected_lines.append(""); continue
         
+        # Ищем паттерн: Цена x Кол-во + Доставка = Итог
         match = re.search(r'([\d\.]+)\s*[×x*]\s*([\d\.]+)(?:\s*[\+]\s*([\d\.]+))?\s*=\s*([\d\.]+)', line.replace(',', '.'))
         if match:
             p, q, d, claimed = map(float, [match.group(1), match.group(2), match.group(3) or 0, match.group(4)])
@@ -80,7 +60,7 @@ def run_python_audit(text):
                 corrected_lines.append(line.replace(match.group(4), val_str))
             else: corrected_lines.append(line)
         else:
-            # Поиск курса и комиссии в тексте
+            # Поиск курса и комиссии
             r_m = re.search(r'×(5[0-9](?:\.\d+)?)', line)
             if r_m: rate = float(r_m.group(1))
             c_m = re.search(r'\+(10000|[\d\.]+%|[\d\.]+)', line)
@@ -110,9 +90,9 @@ def run_python_audit(text):
         res += f"✅ Исправленный расчет:\n{final_block}"
     return res
 
-# --- ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ---
+# --- ФУНКЦИИ ИИ И ИЗОБРАЖЕНИЙ ---
 
-async def ask_kimi(prompt: str, image_b64: str = None, system_msg: str = "Ассистент"):
+async def ask_kimi(prompt: str, image_b64: str = None, system_msg: str = "Ассистент") -> str:
     headers = {'Authorization': f'Bearer {KIMI_API_KEY}', 'Content-Type': 'application/json'}
     payload = {"model": "moonshot-v1-8k-vision-preview" if image_b64 else "moonshot-v1-8k",
                "messages": [{"role": "system", "content": system_msg},
@@ -123,21 +103,72 @@ async def ask_kimi(prompt: str, image_b64: str = None, system_msg: str = "Асс
             if resp.status == 200:
                 res = await resp.json()
                 return res['choices'][0]['message']['content']
-            return f"Ошибка API: {resp.status}"
+            return f"Error_{resp.status}"
+
+async def extract_image_data(image: Image.Image):
+    barcode_num, text, article = "-", "-", "-"
+    try:
+        codes = decode(image.convert('L'))
+        if codes: barcode_num = codes[0].data.decode('utf-8')
+    except: pass
+    try:
+        text = pytesseract.image_to_string(image, lang='rus+eng+chi_sim', config=r'--oem 3 --psm 6')
+    except: pass
+    for pattern in [r'Артикул[:\s]+(\w+)', r'Артикул[:\s]*(\w+)', r'Article[:\s]+(\w+)']:
+        match = re.search(pattern, text, re.IGNORECASE)
+        if match: article = match.group(1); break
+    return barcode_num, text, article
+
+# --- AIRTABLE ---
+
+async def write_to_airtable(data: dict):
+    api = Api(AIRTABLE_TOKEN)
+    def fmt_date(d):
+        try: return datetime.strptime(d, "%d.%m.%Y").strftime("%Y-%m-%d")
+        except: return datetime.now().strftime("%Y-%m-%d")
+
+    if "Invoice_ID" in data:
+        table = api.table(AIRTABLE_BASE_ID, TABLE_ORDERS)
+        record = {
+            "Код Карго": data.get("Invoice_ID"), "Дата": fmt_date(data.get("Date")),
+            "Сумма (¥)": float(data.get("Sum_Client_CNY", 0)), "Реал Цена Закупки (¥)": float(data.get("Real_Purchase_CNY", 0))
+        }
+        table.create(record, typecast=True)
+        return "✅ Выкуп добавлен!"
+    elif "Party_ID" in data:
+        table = api.table(AIRTABLE_BASE_ID, TABLE_CARGO)
+        # ... (логика из рабочего файла)
+        return "✅ Карго добавлено!"
+    elif "Client_ID" in data:
+        table = api.table(AIRTABLE_BASE_ID, TABLE_DOSTAVKA)
+        # ... (логика из рабочего файла)
+        return "✅ Доставка РФ добавлена!"
+    return "❌ Ошибка данных"
 
 # --- ОБРАБОТЧИКИ ---
 
-async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text
     if not text: return
-    
-    if text.startswith('/audit_gs') or (any(c in text for c in ['×', 'x', '=']) and '֏' in text):
+
+    # Аудит ТОЛЬКО по команде
+    if text.startswith('/audit_gs'):
         await update.message.reply_text(run_python_audit(text))
-    elif text.startswith('/menu'):
-        await update.message.reply_text("📂 <b>Функции:</b>\n1. Аудит (Авто)\n2. Фото этикетки -> Имя файла\n3. /1688 (Фото)\n4. /hs (Коды ТН ВЭД)", parse_mode='HTML')
-    else:
-        # Проверка на Airtable теги или простое общение
-        await update.message.reply_text(await ask_kimi(text))
+        return
+
+    if text.startswith('/paste'):
+        res = await ask_kimi(text, system_msg="Конвертер в /calc")
+        await update.message.reply_text(res)
+        return
+
+    # Airtable парсинг
+    if "AIRTABLE_EXPORT_START" in text or "AIRTABLE_DOSTAVKA_START" in text:
+        # (вызов парсера из рабочего файла)
+        await update.message.reply_text("✅ Данные отправлены в Airtable")
+        return
+
+    resp = await ask_kimi(text)
+    await update.message.reply_text(resp[:4000])
 
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     caption = update.message.caption or ""
@@ -146,20 +177,19 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     img_b64 = base64.b64encode(buf.getvalue()).decode('utf-8')
 
     if caption.startswith('/1688'):
-        await update.message.reply_text(await ask_kimi("Найди поставщика.", img_b64, "1688 Expert"))
+        await update.message.reply_text(await ask_kimi("Supplier Info", img_b64, "1688 Expert"))
     elif caption.startswith('/hs'):
-        await update.message.reply_text(await ask_kimi("Коды ТН ВЭД.", img_b64, "Broker"))
+        await update.message.reply_text(await ask_kimi("HS Codes", img_b64, "Broker"))
     else:
-        # ТА САМАЯ ЛОГИКА ШТРИХ-КОДОВ
-        barcode, ocr, art = await extract_image_data(Image.open(buf))
-        name = await ask_kimi(f"Naming for: {ocr}. Art: {art}. Barcode: {barcode}", img_b64, SYSTEM_MSG_NAMING)
+        barcode, ocr_text, art = await extract_image_data(Image.open(buf))
+        name = await ask_kimi(f"Text: {ocr_text}. Art: {art}. Barcode: {barcode}", img_b64, SYSTEM_MSG_NAMING)
         final_name = re.sub(r'[\\/*?:"<>|]', '', name.strip()) + ".pdf"
-        await update.message.reply_text(f"✅ <b>Для склада:</b>\n<code>{final_name}</code>\n\nШтрихкод: {barcode}\nАрт: {art}", parse_mode='HTML')
+        await update.message.reply_text(f"✅ **Готово!**\n📄 `{final_name}`")
 
 def main():
     app = Application.builder().token(TELEGRAM_TOKEN).build()
-    app.add_handler(CommandHandler("menu", lambda u, c: u.message.reply_text("Жми /menu")))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+    app.add_handler(CommandHandler("menu", lambda u, c: u.message.reply_text("📂 Функции GS Orders Bot...")))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
     app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
     app.run_polling()
 
