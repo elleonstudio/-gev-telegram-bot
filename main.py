@@ -139,44 +139,42 @@ async def handle_audit(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Отправь данные после команды /audit")
         return
 
-    msg = await update.message.reply_text("⏳ Выполняю аудит расчетов...")
+    msg = await update.message.reply_text("⏳ Выполняю точный математический аудит...")
     
-    # ИНСТРУКЦИЯ ДЛЯ Kimi (С ЖЕСТКИМ ПРАВИЛОМ НА ֏ И SPLIT)
+    # НОВЫЙ БРОНЕБОЙНЫЙ ШАБЛОН ДЛЯ ИИ
     system_audit = (
-        "Ты — строгий финансовый аудитор логистической компании. Твоя задача — перепроверить математику в расчете пользователя.\n\n"
-        "ПРАВИЛА ПРОВЕРКИ:\n"
-        "1. Формула для товара: (Цена × Количество) + Доставка = Итог строки\n"
-        "2. Формула общей суммы: (Сумма всех итогов) × 58 = Предварительная сумма\n"
-        "3. Финальная сумма: Предварительная сумма + Доп. расходы = Итого ֏\n\n"
-        "ФОРМАТ ОТВЕТА (СТРОГО 2 ЧАСТИ через ===SPLIT===):\n\n"
-        "ЧАСТЬ 1 (Анализ):\n"
-        "Если есть ошибки, напиши '❌ Найдены ошибки в расчетах!'. Покажи, в какой строке ошибка (формат: Было -> Правильно). "
-        "ОБЯЗАТЕЛЬНО вычисли разницу в финальной сумме (в драмах) и напиши: '💸 Расхождение: [СУММА] ֏'. "
-        "Если всё верно, напиши '✅ Ошибок нет, финальная сумма [СУММА]֏ верна.'\n\n"
-        "===SPLIT===\n\n"
-        "ЧАСТЬ 2 (Чистый текст для копирования):\n"
-        "ПЕРВАЯ СТРОКА СТРОГО: /audit-gs\n"
-        "Далее скопируй оригинальный текст пользователя, но ЗАМЕНИ все ошибочные цифры на правильные. Никаких лишних слов и комментариев!"
+        "Ты — точнейший финансовый калькулятор-аудитор. Твоя задача — проверить математику пользователя БЕЗ ОКРУГЛЕНИЙ.\n"
+        "СЧИТАЙ СТРОГО ПО ШАГАМ! Пример: 7.5 × 200 + 144. Шаг 1: 7.5*200=1500. Шаг 2: 1500+144=1644.\n\n"
+        "Формулы:\n"
+        "1. Товар: (Цена × Количество) + Доставка = Итог\n"
+        "2. Общая сумма: (Сумма всех итогов) × 58 = База\n"
+        "3. Финальная сумма: База + Доп. расходы = Итого ֏\n\n"
+        "ВЫДАЙ ОТВЕТ СТРОГО ПО ЭТОМУ ШАБЛОНУ (НИКАКИХ СЛОВ 'ЧАСТЬ 1' или 'ЧАСТЬ 2'):\n\n"
+        "❌ Найдены ошибки в расчетах! (Или '✅ Ошибок нет')\n"
+        "Строка: Было [что написал юзер] -> Правильно [твой точный расчет]\n"
+        "💸 Расхождение: [Разница в драмах] ֏\n"
+        "===SPLIT===\n"
+        "/audit-gs\n"
+        "[Оригинальный текст пользователя с исправленными цифрами]"
     )
     
     try:
         res = await ask_kimi(f"Проверь этот расчет:\n{raw_input}", system_msg=system_audit)
         
-        # Разрезаем ответ на 2 сообщения
+        # Разрезаем ответ и удаляем мусор, если ИИ все же написал "ЧАСТЬ"
         if "===SPLIT===" in res:
             parts = res.split("===SPLIT===")
-            analysis = parts[0].strip()
-            corrected_text = parts[1].strip()
+            analysis = parts[0].replace("ЧАСТЬ 1 (Анализ):", "").replace("ЧАСТЬ 1", "").strip()
+            corrected_text = parts[1].replace("ЧАСТЬ 2 (Чистый текст для копирования):", "").replace("ЧАСТЬ 2", "").strip()
             
-            # Принудительная защита: если ИИ забыл поставить /audit-gs, мы добавляем сами
+            # Убеждаемся, что начинается с /audit-gs
             if not corrected_text.startswith("/audit-gs"):
                 corrected_text = "/audit-gs\n" + corrected_text
                 
-            # Отправка
-            await msg.edit_text(analysis) # Сообщение 1: Отчет
-            await update.message.reply_text(corrected_text) # Сообщение 2: Чистый код
+            await msg.edit_text(analysis)
+            await update.message.reply_text(corrected_text)
         else:
-            await msg.edit_text(f"⚠️ ИИ ответил не по формату, но вот результат:\n\n{res}")
+            await msg.edit_text(f"⚠️ Ошибка формата ответа от ИИ, но вот результат:\n\n{res}")
             
     except Exception as e:
         await msg.edit_text(f"❌ Ошибка ИИ: {e}")
@@ -227,8 +225,6 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text
     if not text: return
     if text.strip().startswith('/calc'): return
-    
-    # Игнорируем вывод аудита, если ты случайно скопируешь его обратно боту
     if text.strip().startswith('/audit-gs'): return
 
     if "AIRTABLE_EXPORT_START" in text:
@@ -297,11 +293,8 @@ def main():
     
     app.add_handler(CommandHandler("start", lambda u, c: u.message.reply_text("🤖 Бот готов! Нажми /menu")))
     app.add_handler(CommandHandler("menu", show_menu))
-    
-    # Обработчики команд, которые работают даже с многострочным текстом
     app.add_handler(MessageHandler(filters.Regex(r'^/paste(\s|$)'), handle_paste))
     app.add_handler(MessageHandler(filters.Regex(r'^/audit(\s|$)'), handle_audit))
-    
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
     app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
     
