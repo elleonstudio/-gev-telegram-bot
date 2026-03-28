@@ -1,100 +1,107 @@
 import os
 import re
 import logging
+import base64
+import aiohttp
+from io import BytesIO
 from datetime import datetime
 from telegram import Update, BotCommand
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
+from PIL import Image
 
-# --- НАСТРОЙКИ ---
-logging.basicConfig(level=logging.INFO)
+# --- НАСТРОЙКИ ЛОГИРОВАНИЯ ---
+logging.basicConfig(
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO
+)
+logger = logging.getLogger(__name__)
+
+# Чтение переменных
 TELEGRAM_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
-# Airtable данные остаются прежними
+KIMI_API_KEY = os.getenv('KIMI_API_KEY')
+AIRTABLE_TOKEN = "pati6TFqzPlZaI08o.88a1e98775f215fb08b58c2fde28b38acebc5f4556c8eb850b9ca9930dbcf607"
+AIRTABLE_BASE_ID = "appRIlSL63Kxh6iWX"
 
-# --- МОТОР МАТЕМАТИКИ (ЧИСТЫЙ PYTHON) ---
-
-def fast_audit(text):
+# --- МАТЕМАТИЧЕСКИЙ ДВИЖОК (PYTHON) ---
+def precise_audit(text):
     lines = text.replace('/audit_gs', '').strip().split('\n')
-    audit_results = []
+    errors = []
     total_cny = 0.0
     
-    # Регулярка для поиска курса и комиссии
-    found_rate = re.search(r'(?:курс|rate|1¥-)\s*(\d+[\.,]?\d*)', text.lower())
-    rate = float(found_rate.group(1).replace(',', '.')) if found_rate else 58.0
+    # Ищем курс (по умолчанию 58)
+    rate_match = re.search(r'(?:курс|rate|1¥-)\s*(\d+[\.,]?\d*)', text.lower())
+    rate = float(rate_match.group(1).replace(',', '.')) if rate_match else 58.0
     
-    found_comm = re.search(r'\+(\d+)\s*(?:֏|драм|amd)', text.lower())
-    commission = float(found_comm.group(1)) if found_comm else 10000.0
-
-    errors = []
-    processed_lines = []
+    # Ищем комиссию (по умолчанию 10000)
+    comm_match = re.search(r'\+(\d+)\s*(?:֏|драм|amd)', text.lower())
+    commission = float(comm_match.group(1)) if comm_match else 10000.0
 
     for line in lines:
-        if not line.strip() or '֏' in line or '×' not in line:
-            processed_lines.append(line)
-            continue
-            
-        try:
-            # Парсим строку: 6.99x125+35=909
-            parts = re.split(r'=', line)
-            if len(parts) < 2: 
-                processed_lines.append(line)
-                continue
+        if '=' in line and any(c in line for c in ['×', 'x', '*']):
+            try:
+                parts = line.split('=')
+                expr = parts[0].replace('×', '*').replace('x', '*').strip()
+                claimed = float(re.sub(r'[^\d\.]', '', parts[1].replace(',', '.')).strip())
+                # Чистый расчет Python
+                actual = round(eval(re.sub(r'[^\d\.\*\+\-\/]', '', expr)), 2)
                 
-            expr = parts[0].replace('×', '*').replace('x', '*').strip()
-            claimed = float(re.sub(r'[^\d\.]', '', parts[1].replace(',', '.')).strip())
-            
-            # Считаем на Python
-            actual = round(eval(re.sub(r'[^\d\.\*\+\-\/]', '', expr)), 2)
-            
-            if abs(actual - claimed) > 0.001:
-                errors.append(f"Строка:\nБыло: {line.strip()}\nПравильно: {expr.replace('*', '×')} = {actual}")
-                total_cny += actual
-            else:
-                total_cny += actual
-            processed_lines.append(line)
-        except:
-            processed_lines.append(line)
+                if abs(actual - claimed) > 0.01:
+                    errors.append(f"Было: {line.strip()}\nПравильно: {parts[0].strip()} = {actual}")
+                    total_cny += actual
+                else:
+                    total_cny += actual
+            except Exception as e:
+                logger.error(f"Ошибка парсинга строки: {e}")
+        elif re.search(r'^\d+[\.,]?\d*$', line.strip()): # Если просто число
+            total_cny += float(line.strip().replace(',', '.'))
 
-    # Финальный расчет
-    final_amd_actual = round((total_cny * rate) + commission, 2)
+    final_real = round((total_cny * rate) + commission, 2)
     
-    # Проверка финальной суммы в тексте
-    claimed_final_match = re.search(r'=(\d+)\s*֏', text)
-    claimed_final = float(claimed_final_match.group(1)) if claimed_final_match else 0
+    # Ищем итоговую сумму пользователя
+    claimed_final = 0
+    final_match = re.search(r'=(\d+)\s*֏', text)
+    if final_match: claimed_final = float(final_match.group(1))
+
+    header = f"/audit_gs\n\n{text.replace('/audit_gs', '').strip()}\n\n"
     
-    header = "/audit_gs\n\n" + "\n".join(processed_lines) + "\n\n"
-    
-    if not errors and abs(final_amd_actual - claimed_final) < 1:
-        return header + f"✅ Ошибок нет, финальная сумма {int(final_amd_actual)}֏ верна."
+    if not errors and abs(final_real - claimed_final) < 1:
+        return header + f"✅ Ошибок нет, финальная сумма {int(final_real)}֏ верна."
     else:
         res = header + "❌ Найдены ошибки в расчетах!\n\n"
         if errors:
-            res += "\n\n".join(errors) + "\n\n"
-        
-        res += f"Сумма:\nБыло: {int(claimed_final)}֏\nПравильно: {final_amd_actual}֏\n\n"
-        res += f"Расхождение: {round(abs(final_amd_actual - claimed_final), 2)}֏\n\n"
-        res += "✅ Исправленный расчет:\n[Здесь будет чистый блок]"
+            res += "Строка:\n" + "\n\n".join(errors) + "\n\n"
+        res += f"Сумма:\nБыло: {int(claimed_final)}֏\nПравильно: {final_real}֏\n\n"
+        res += f"Расхождение: {round(abs(final_real - claimed_final), 2)}֏"
         return res
 
-# --- ОБРАБОТЧИКИ ---
-
+# --- ОСНОВНЫЕ ОБРАБОТЧИКИ ---
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text
     if not text: return
 
-    if text.startswith('/audit_gs'):
-        report = fast_audit(text)
-        await update.message.reply_text(report)
-        return
-
-    if text.startswith('/menu'):
-        await update.message.reply_text("1️⃣ /audit_gs - Точный расчет (Python)\n2️⃣ /paste - Шаблон\n3️⃣ Фото - Склад")
-
-# ОСТАЛЬНЫЕ ФУНКЦИИ (Airtable, Фото) копируются из прошлой версии...
+    try:
+        if text.startswith('/audit_gs'):
+            result = precise_audit(text)
+            await update.message.reply_text(result)
+        elif text.startswith('/menu'):
+            await update.message.reply_text("📂 Функции:\n1. /audit_gs - Точный аудит\n2. /paste - Шаблон\n3. Фото - Склад")
+        elif text.startswith('/start'):
+            await update.message.reply_text("🤖 Бот GS Orders готов к работе!")
+    except Exception as e:
+        logger.error(f"Ошибка в handle_message: {e}")
+        await update.message.reply_text("❌ Произошла ошибка при обработке.")
 
 def main():
+    if not TELEGRAM_TOKEN:
+        logger.error("TELEGRAM_BOT_TOKEN не найден!")
+        return
+        
     app = Application.builder().token(TELEGRAM_TOKEN).build()
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-    app.run_polling()
+    app.add_handler(CommandHandler("start", handle_message))
+    app.add_handler(CommandHandler("menu", handle_message))
+    
+    logger.info("Бот запускается...")
+    app.run_polling(drop_pending_updates=True)
 
 if __name__ == '__main__':
     main()
