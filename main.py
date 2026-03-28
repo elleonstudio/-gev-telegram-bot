@@ -138,7 +138,7 @@ async def perform_audit(update: Update, raw_input: str):
         "Ты — строгий финансовый аудитор. Твоя задача проверить расчеты пользователя и выдать ОДНО сообщение СТРОГО по шаблону ниже.\n"
         "Пересчитай всё дважды: (Цена × Кол-во) + Доставка = Итог строки.\n\n"
         "ОБЯЗАТЕЛЬНО соблюдай этот формат символ в символ (не пиши лишних слов):\n\n"
-        "/audit-gs\n"
+        "/audit_gs\n"
         "[Оригинальный текст пользователя 1 в 1]\n\n"
         "❌ Найдены ошибки в расчетах! (или ✅ Ошибок нет)\n\n"
         "Строка:\n"
@@ -207,7 +207,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     # Игнорируем команды и вывод самого бота
     if text.strip().startswith('/calc'): return
-    if text.strip().startswith('/audit-gs'): return
+    if text.strip().startswith('/audit_gs'): return
 
     if "AIRTABLE_EXPORT_START" in text:
         data = parse_airtable_block(text, "AIRTABLE_EXPORT_START", "AIRTABLE_EXPORT_END")
