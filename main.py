@@ -216,6 +216,10 @@ def main():
     
     app.add_handler(CommandHandler("start", lambda u, c: u.message.reply_text("🤖 Бот готов! Нажми /menu")))
     app.add_handler(CommandHandler("menu", show_menu))
+    
+    # ВОТ ЭТА СТРОЧКА ИСПРАВЛЯЕТ МОЛЧАНИЕ:
+    app.add_handler(CommandHandler("paste", handle_text)) 
+    
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
     app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
     
