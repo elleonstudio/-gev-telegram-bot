@@ -139,25 +139,35 @@ async def handle_paste(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Отправь данные после команды /paste")
         return
 
-    msg = await update.message.reply_text("⏳ Формирую расчет...")
+    msg = await update.message.reply_text("⏳ Формирую шаблон...")
     
+    # ВОТ ОН: ТВОЙ ЛЮБИМЫЙ ДЛИННЫЙ ШАБЛОН!
     system_paste = (
-        "Ты форматируешь расчеты для логистического бота.\n"
-        "Твоя задача — вернуть текст пользователя в виде красивого столбика, НИЧЕГО не вычисляя.\n"
-        "ФОРМАТ СТРОГО ТАКОЙ:\n"
-        "/calc\n"
-        "[Имя клиента]\n"
-        "[Цена]x[Кол-во]+[Доставка]=[Итог] [Название]\n"
-        "(и так все товары)\n\n"
-        "[Итоговые суммы из оригинального текста]\n\n"
-        "ПРАВИЛА:\n"
-        "1. НЕ добавляй слова 'Товар', 'Цена', 'Закупка'.\n"
-        "2. НЕ ставь весь текст в скобки.\n"
-        "3. Первая строка строго /calc без скобок."
+        "Ты — технический конвертер данных. Твоя задача: ПЕРЕУПАКОВАТЬ расчет пользователя СТРОГО по шаблону.\n\n"
+        "ЛОГИКА РАЗБОРА строки (например '7.5x200+144=1644 vase'):\n"
+        "1. Название: vase (текст в конце строки)\n"
+        "2. Количество: 200 (число после знака 'x')\n"
+        "3. Цена клиенту: 7.5 (самое первое число)\n"
+        "4. Доставка: 144 (число после знака '+')\n"
+        "ИГНОРИРУЙ любые итоги (например, 1644, 153260).\n\n"
+        "ФОРМАТ ОТВЕТА СТРОГО ТАКОЙ:\n"
+        "/calc\n\n"
+        "Клиент: [Имя клиента из первой строки]\n\n"
+        "Товар [N]:\n"
+        "Название: [Name]\n"
+        "Количество: [Qty]\n"
+        "Цена клиенту: [Price]\n"
+        "Закупка: -\n"
+        "Доставка: [Logistics]\n"
+        "Размеры: - - - -\n\n"
+        "(повтори для всех товаров)\n\n"
+        "Курс клиенту: 58\n"
+        "Мой курс: 55"
     )
     
     try:
         res = await ask_kimi(f"Оформи это:\n{raw_input}", system_msg=system_paste)
+        # Защита от лишних скобок
         res = res.replace("(calc", "/calc").replace("(/calc", "/calc")
         if res.endswith(")"):
             res = res[:-1]
@@ -165,7 +175,6 @@ async def handle_paste(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         await msg.edit_text(f"❌ Ошибка ИИ: {e}")
 
-# ВОТ ФУНКЦИЯ КОТОРАЯ БЫЛА УТЕРЯНА
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text
     if not text: return
@@ -214,7 +223,7 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def show_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     menu_text = (
         "<b>📂 Меню GS Orders Bot:</b>\n\n"
-        "1️⃣ <b>/paste [данные]</b> - перенос расчета в шаблон /calc\n"
+        "1️⃣ <b>/paste [данные]</b> - перенос расчета в подробный шаблон /calc\n"
         "2️⃣ <b>/1688 [фото]</b> - инфо о поставщике с картинки\n"
         "3️⃣ <b>/hs [фото]</b> - подбор кодов ТН ВЭД\n"
         "4️⃣ <b>Просто фото этикетки</b> - формирует китайское имя файла\n"
@@ -235,7 +244,6 @@ def main():
     
     app.add_handler(CommandHandler("start", lambda u, c: u.message.reply_text("🤖 Бот готов! Нажми /menu")))
     app.add_handler(CommandHandler("menu", show_menu))
-    
     app.add_handler(MessageHandler(filters.Regex(r'^/paste'), handle_paste))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
     app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
