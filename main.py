@@ -25,22 +25,15 @@ AIRTABLE_BASE_ID = "appRIlSL63Kxh6iWX"
 
 TABLE_ORDERS = "Закупка"
 TABLE_CARGO = "Логистика Карго"
+TABLE_DOSTAVKA = "Доставка в РФ" # НОВАЯ ТАБЛИЦА
 
-# ИСПРАВЛЕННАЯ ЖЕСТКАЯ ИНСТРУКЦИЯ (Никаких русских букв в имени файла!)
+# Инструкция для китайского фулфилмента
 SYSTEM_MSG_NAMING = (
-    "Ты — переводчик и эксперт по логистике. Твоя задача: прочитать этикетку, ПЕРЕВЕСТИ суть товара на КИТАЙСКИЙ и АНГЛИЙСКИЙ, и выдать результат строго по шаблону.\n\n"
-    "ШАБЛОН ОТВЕТА (сохрани именно такой вид):\n"
-    "FILE: ИЕРОГЛИФЫ_EnglishName_Размер_Артикул_Штрихкод.pdf\n"
-    "📝 Детали с этикетки:\n"
-    "🔸 Товар: [Название на русском]\n"
-    "🔸 Цвет/Материал: [Цвет на русском]\n"
-    "🔸 Товар (EN): [Название на английском]\n"
-    "🔸 Цвет (EN): [Цвет на английском]\n\n"
-    "ПРАВИЛА ДЛЯ СТРОКИ FILE:\n"
-    "1. Слово 'ИЕРОГЛИФЫ' замени на ПЕРЕВОД товара и цвета НА КИТАЙСКИЙ ЯЗЫК (например: 棕色虎纹套装). ЭТО КРИТИЧЕСКИ ВАЖНО!\n"
-    "2. В строке FILE вообще не должно быть русских букв, транслита или скобок []. Только иероглифы и английский.\n"
-    "3. Если нет размера, пиши '-'.\n"
-    "Пример идеальной строки FILE: 棕色虎纹套装_BrownTigerSet_-_880002359_2049595583930.pdf"
+    "Ты — эксперт по логистике в Китае. Твоя задача — создать имя файла для китайского фулфилмента. "
+    "Формат СТРОГО: [Описание на китайском]_[Description in English]_[Размер]_[Артикул]_[Штрихкод]. "
+    "В описании ОБЯЗАТЕЛЬНО укажи: что это за товар, его ЦВЕТ и МАТЕРИАЛ (или тип набора). "
+    "Пример: 棕色虎纹套装_BrownTigerSet_M_880002359_2049595583930. "
+    "Если размера нет, ставь '-'. Выдай только одну строку текста, без лишних слов, без расширения .pdf."
 )
 
 # --- ФУНКЦИИ ИИ ---
@@ -74,6 +67,16 @@ async def extract_image_data(image: Image.Image):
         if match: article = match.group(1); break
     return barcode_num, text, article
 
+def parse_airtable_block(text: str, start_tag: str, end_tag: str) -> dict:
+    parsed = {}
+    match = re.search(fr'{start_tag}(.*?){end_tag}', text, re.DOTALL)
+    if match:
+        for line in match.group(1).strip().split('\n'):
+            if ':' in line:
+                key, val = line.split(':', 1)
+                parsed[key.strip()] = val.strip()
+    return parsed
+
 # --- AIRTABLE ЛОГИКА ---
 
 async def write_to_airtable(data: dict):
@@ -82,6 +85,7 @@ async def write_to_airtable(data: dict):
         try: return datetime.strptime(d, "%d.%m.%Y").strftime("%Y-%m-%d")
         except: return datetime.now().strftime("%Y-%m-%d")
 
+    # ТИП 1: ВЫКУП
     if "Invoice_ID" in data:
         table = api.table(AIRTABLE_BASE_ID, TABLE_ORDERS)
         full_id = data.get("Invoice_ID", "")
@@ -96,6 +100,7 @@ async def write_to_airtable(data: dict):
         table.create(record, typecast=True)
         return f"✅ Выкупы: Заказ {full_id} для {client_name} добавлен!"
 
+    # ТИП 2: ЛОГИСТИКА КАРГО
     elif "Party_ID" in data:
         table = api.table(AIRTABLE_BASE_ID, TABLE_CARGO)
         record = {
@@ -110,7 +115,23 @@ async def write_to_airtable(data: dict):
         }
         table.create(record, typecast=True)
         return f"✅ Карго: Партия {data.get('Party_ID')} добавлена!"
-    return "❌ Ошибка: Тип данных не определен."
+
+    # ТИП 3: ДОСТАВКА В РФ (НОВОЕ)
+    elif "Client_ID" in data and "Logistics_RUB" in data:
+        table = api.table(AIRTABLE_BASE_ID, TABLE_DOSTAVKA)
+        record = {
+            "Клиент / Код заказа": data.get("Client_ID", ""),
+            "Дата расчета": fmt_date(data.get("Date")),
+            "Количество коробок": int(data.get("Total_Boxes", 0)),
+            "Маршрут / Склады": data.get("Destinations", ""),
+            "Себестоимость РФ (RUB)": float(data.get("Logistics_RUB", 0)),
+            "Курс клиента (RUB/AMD)": float(data.get("Rate_RUB_AMD", 0)),
+            "К оплате за доставку (AMD)": int(float(data.get("Total_Client_AMD", 0)))
+        }
+        table.create(record, typecast=True)
+        return f"✅ Доставка РФ: Расчет для {data.get('Client_ID')} добавлен!"
+
+    return "❌ Ошибка: Тип данных не определен (нет Invoice_ID, Party_ID или Client_ID)."
 
 # --- ОБРАБОТЧИКИ ---
 
@@ -119,6 +140,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not text: return
     if text.strip().startswith('/calc'): return
 
+    # Команда /paste
     if text.startswith('/paste'):
         raw_input = text.replace('/paste', '').strip()
         msg = await update.message.reply_text("⏳ Формирую шаблон...")
@@ -127,18 +149,23 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await msg.edit_text(res.strip())
         return
 
+    # Airtable парсинг ТИП 1 и 2 (Выкуп и Карго)
     if "AIRTABLE_EXPORT_START" in text:
-        data = re.search(r'AIRTABLE_EXPORT_START(.*?)AIRTABLE_EXPORT_END', text, re.DOTALL)
+        data = parse_airtable_block(text, "AIRTABLE_EXPORT_START", "AIRTABLE_EXPORT_END")
         if data:
-            parsed = {}
-            for line in data.group(1).strip().split('\n'):
-                if ':' in line:
-                    key, val = line.split(':', 1)
-                    parsed[key.strip()] = val.strip()
-            status = await write_to_airtable(parsed)
+            status = await write_to_airtable(data)
             await update.message.reply_text(status)
         return
 
+    # Airtable парсинг ТИП 3 (Доставка в РФ)
+    if "AIRTABLE_DOSTAVKA_START" in text:
+        data = parse_airtable_block(text, "AIRTABLE_DOSTAVKA_START", "AIRTABLE_DOSTAVKA_END")
+        if data:
+            status = await write_to_airtable(data)
+            await update.message.reply_text(status)
+        return
+
+    # Обычное общение с ИИ
     resp = await ask_kimi(text)
     await update.message.reply_text(resp[:4000])
 
@@ -155,80 +182,15 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         res = await ask_kimi("Suggest 3 HS Codes.", image_b64=img_b64, system_msg="Broker.")
         await update.message.reply_text(res)
     else:
-        msg = await update.message.reply_text("⏳ Читаю этикетку...")
         barcode, ocr_text, art = await extract_image_data(Image.open(buf))
-        prompt = f"Текст с этикетки: {ocr_text}. Артикул: {art}. Штрихкод: {barcode}."
-        
-        res_raw = await ask_kimi(prompt, image_b64=img_b64, system_msg=SYSTEM_MSG_NAMING)
-        
-        file_match = re.search(r'FILE:\s*([^\n]+\.pdf)', res_raw, re.IGNORECASE)
-        if file_match:
-            final_name = re.sub(r'[\\/*?:"<>|]', '', file_match.group(1).strip())
-            details = res_raw.replace(file_match.group(0), '').strip()
-        else:
-            final_name = "label_converted.pdf"
-            details = res_raw.strip()
-
-        wb_link = f"👉 https://www.wildberries.ru/search?search={art}" if art and art != "-" else ""
-        
-        caption_text = (
-            f"✅ Штрих-код: {barcode}\n"
-            f"✅ Артикул: {art} {wb_link}\n"
-            f"{details}\n\n"
-            f"📄 Имя файла: `{final_name}`"
+        prompt = (
+            f"Текст с этикетки: {ocr_text}. Артикул: {art}. Штрихкод: {barcode}. "
+            f"Внимательно изучи текст и выдели ГЛАВНОЕ для китайского рабочего: что за товар, какой цвет и материал/набор. "
+            f"Сформируй имя файла строго по шаблону."
         )
-        await msg.edit_text(caption_text)
-
-# ОБРАБОТКА PDF
-async def handle_doc(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    doc = update.message.document
-    if not doc.file_name.lower().endswith('.pdf'):
-        return
-
-    msg = await update.message.reply_text("⏳ Читаю PDF и переименовываю...")
-    try:
-        buf = BytesIO()
-        file = await context.bot.get_file(doc.file_id)
-        await file.download_to_memory(buf)
-        buf.seek(0)
-        
-        images = convert_from_bytes(buf.read(), dpi=200, first_page=1, last_page=1)
-        image = images[0]
-        barcode, ocr_text, art = await extract_image_data(image)
-        
-        img_byte_arr = BytesIO()
-        image.save(img_byte_arr, format='JPEG')
-        img_b64 = base64.b64encode(img_byte_arr.getvalue()).decode('utf-8')
-
-        prompt = f"Текст с этикетки: {ocr_text}. Артикул: {art}. Штрихкод: {barcode}."
-        res_raw = await ask_kimi(prompt, image_b64=img_b64, system_msg=SYSTEM_MSG_NAMING)
-        
-        file_match = re.search(r'FILE:\s*([^\n]+\.pdf)', res_raw, re.IGNORECASE)
-        if file_match:
-            final_name = re.sub(r'[\\/*?:"<>|]', '', file_match.group(1).strip())
-            details = res_raw.replace(file_match.group(0), '').strip()
-        else:
-            final_name = "label_converted.pdf"
-            details = res_raw.strip()
-        
-        wb_link = f"👉 https://www.wildberries.ru/search?search={art}" if art and art != "-" else ""
-
-        buf.seek(0)
-        await msg.delete()
-        
-        caption_text = (
-            f"📦 Страниц: 1\n"
-            f"✅ Штрих-код: {barcode}\n"
-            f"✅ Артикул: {art} {wb_link}\n"
-            f"{details}"
-        )
-        
-        await update.message.reply_document(
-            document=InputFile(buf, filename=final_name), 
-            caption=caption_text
-        )
-    except Exception as e:
-        await msg.edit_text(f"❌ Ошибка при чтении PDF: {e}")
+        new_name_raw = await ask_kimi(prompt, image_b64=img_b64, system_msg=SYSTEM_MSG_NAMING)
+        final_name = re.sub(r'[\\/*?:"<>|]', '', new_name_raw.strip()) + ".pdf"
+        await update.message.reply_text(f"✅ **Готово для склада!**\n📄 `{final_name}`\nBarcode: {barcode}\nArt: {art}")
 
 async def show_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     menu_text = (
@@ -236,8 +198,10 @@ async def show_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "1️⃣ <b>/paste [данные]</b> - перенос расчета в шаблон /calc\n"
         "2️⃣ <b>/1688 [фото]</b> - инфо о поставщике с картинки\n"
         "3️⃣ <b>/hs [фото]</b> - подбор кодов ТН ВЭД\n"
-        "4️⃣ <b>Этикетки (Фото или PDF)</b> - формирует китайское имя файла для склада\n"
-        "5️⃣ <b>AIRTABLE_EXPORT</b> - авто-запись данных в базу"
+        "4️⃣ <b>Просто фото этикетки</b> - формирует китайское имя файла\n"
+        "5️⃣ <b>Экспорт данных (Airtable)</b>:\n"
+        "  • <code>AIRTABLE_EXPORT_START</code> (Выкуп / Логистика)\n"
+        "  • <code>AIRTABLE_DOSTAVKA_START</code> (Доставка по РФ)"
     )
     await update.message.reply_text(menu_text, parse_mode='HTML')
 
@@ -254,7 +218,6 @@ def main():
     app.add_handler(CommandHandler("menu", show_menu))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
     app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
-    app.add_handler(MessageHandler(filters.Document.ALL, handle_doc))
     
     async def set_commands(application):
         await application.bot.set_my_commands(commands)
