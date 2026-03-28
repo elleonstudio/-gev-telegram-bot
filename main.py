@@ -133,7 +133,6 @@ async def write_to_airtable(data: dict):
 # --- ОБРАБОТЧИКИ ---
 
 async def handle_paste(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # ЖЕСТКИЙ ПЕРЕХВАТ КОМАНДЫ /paste
     text = update.message.text
     raw_input = text.replace('/paste', '').strip()
     
@@ -141,23 +140,34 @@ async def handle_paste(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Отправь данные после команды /paste")
         return
 
-    msg = await update.message.reply_text("⏳ Формирую шаблон...")
+    msg = await update.message.reply_text("⏳ Формирую расчет...")
     
     system_paste = (
-        "Ты технический конвертер. Расставь данные в шаблон /calc. "
-        "Цена - 1-е число, Кол-во - после x, Доставка - после +. "
-        "Курс клиенту: 58, Мой курс: 55. Начало ответа строго: /calc"
+        "Ты форматируешь расчеты для логистического бота.\n"
+        "Твоя задача — вернуть текст пользователя в виде красивого столбика, НИЧЕГО не вычисляя.\n"
+        "ФОРМАТ СТРОГО ТАКОЙ:\n"
+        "/calc\n"
+        "[Имя клиента]\n"
+        "[Цена]x[Кол-во]+[Доставка]=[Итог] [Название]\n"
+        "(и так все товары)\n\n"
+        "[Итоговые суммы из оригинального текста]\n\n"
+        "ПРАВИЛА:\n"
+        "1. НЕ добавляй слова 'Товар', 'Цена', 'Закупка'.\n"
+        "2. НЕ ставь весь текст в скобки.\n"
+        "3. Первая строка строго /calc без скобок."
     )
+    
     try:
-        res = await ask_kimi(f"Данные:\n{raw_input}", system_msg=system_paste)
+        res = await ask_kimi(f"Оформи это:\n{raw_input}", system_msg=system_paste)
+        
+        # Бронебойная защита от галлюцинаций ИИ: принудительно чистим скобки вокруг calc
+        res = res.replace("(calc", "/calc").replace("(/calc", "/calc")
+        if res.endswith(")"):
+            res = res[:-1]
+            
         await msg.edit_text(res.strip())
     except Exception as e:
         await msg.edit_text(f"❌ Ошибка ИИ: {e}")
-
-async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    text = update.message.text
-    if not text: return
-    if text.strip().startswith('/calc'): return
 
     # Airtable парсинг
     if "AIRTABLE_EXPORT_START" in text:
