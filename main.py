@@ -120,14 +120,13 @@ async def write_to_airtable(data: dict, data_type: str = "EXPORT"):
 
 async def run_audit(update: Update, text: str):
     system_audit = (
-        "Ты — идеальный финансовый аудитор. Проверь расчет пользователя.\n"
-        "ПРАВИЛА:\n"
+        "Ты — идеальный финансовый аудитор. Ответ ВСЕГДА начинай строго с заголовка /audit_gs.\n\n"
+        "ПРАВИЛА ДИЗАЙНА:\n"
         "1. Пересчитай каждую строку (Цена × Кол-во + Доставка). Целое число (1234 вместо 1234.00) — НЕ ошибка.\n"
-        "2. Найди курс в тексте. Если нет — используй 58.\n"
-        "3. Проверь итоговую сумму: (Сумма юаней × Курс) + Комиссия (10000 или %).\n"
-        "Если всё верно: '✅ Ошибок нет, финальная сумма верна.'\n"
-        "Если ошибка: '❌ Найдены ошибки в расчетах!', укажи 'Было/Правильно' и 'Расхождение'.\n"
-        "В конце ВСЕГДА выдавай блок '✅ Исправленный расчет:' с чистым текстом для копирования."
+        "2. Курс: ищи в тексте, иначе 58. Комиссия: 10000 или %.\n"
+        "3. Если ОШИБОК НЕТ: выведи исходный расчет, а затем строку '✅ Ошибок нет, финальная сумма [X]֏ верна.'\n"
+        "4. Если ОШИБКИ ЕСТЬ: выведи '❌ Найдены ошибки в расчетах!', затем блоки 'Строка:', 'Сумма:', 'Расхождение:' с пустой строкой между ними. В конце — '✅ Исправленный расчет:'.\n"
+        "Соблюдай отступы как в примерах пользователя."
     )
     res = await ask_kimi(text, system_msg=system_audit)
     await update.message.reply_text(res)
@@ -142,20 +141,17 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("⛔ Операция отменена.")
         return
 
-    # Авто-детект Аудита (если есть математика)
-    if any(char in text for char in ['×', '*', '+', '=']) and '֏' in text:
+    # Авто-детект Аудита
+    if any(char in text for char in ['×', '*', '+', '=']) and ('֏' in text or '¥' in text):
         await run_audit(update, text)
         return
 
-    # Команда /paste
     if text.startswith('/paste'):
         raw = text.replace('/paste', '').strip()
-        system_p = "Конвертер в /calc. Курс 58/55. Не считай сам, просто расставь данные."
-        res = await ask_kimi(raw, system_msg=system_p)
+        res = await ask_kimi(raw, system_msg="Конвертер в /calc. Курс 58/55.")
         await update.message.reply_text(res)
         return
 
-    # Airtable
     for tag, t_type in [("AIRTABLE_EXPORT_START", "EXPORT"), ("AIRTABLE_DOSTAVKA_START", "DOSTAVKA")]:
         if tag in text:
             match = re.search(f"{tag}(.*?){tag.replace('START', 'END')}", text, re.DOTALL)
@@ -179,9 +175,7 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(res)
     elif caption.startswith('/hs'):
         res = await ask_kimi("Suggest 3 HS Codes.", image_b64=img_b64, system_msg="Broker.")
-        codes = re.findall(r'\b\d{4,10}\b', res)
-        links = "\n\n🔍 Alta.ru:\n" + "\n".join([f"👉 [Код {c}](https://www.alta.ru/tnved/code/{c}/)" for c in set(codes)])
-        await update.message.reply_text(res + links, parse_mode='Markdown', disable_web_page_preview=True)
+        await update.message.reply_text(res)
     else:
         barcode, ocr, art = await extract_image_data(Image.open(buf))
         name = await ask_kimi(f"Naming: {ocr}. Art: {art}. Barcode: {barcode}.", image_b64=img_b64, system_msg=SYSTEM_MSG_NAMING)
@@ -193,7 +187,6 @@ def main():
     app.add_handler(CommandHandler("start", lambda u, c: u.message.reply_text("🤖 Бот GS Orders готов!")))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
-    
     app.run_polling(drop_pending_updates=True)
 
 if __name__ == '__main__':
