@@ -8,7 +8,6 @@ from datetime import datetime
 
 from telegram import Update, InputFile, BotCommand
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
-from pdf2image import convert_from_bytes
 from PIL import Image
 import pytesseract
 from pyzbar.pyzbar import decode
@@ -18,32 +17,25 @@ from pyairtable import Api
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-TELEGRAM_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN') # Токен GS Assistant
-KIMI_API_KEY = os.getenv('KIMI_API_KEY')
+TELEGRAM_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN', 'ВАШ_TELEGRAM_ТОКЕН')
+KIMI_API_KEY = os.getenv('KIMI_API_KEY', 'ВАШ_KIMI_ТОКЕН')
 AIRTABLE_TOKEN = "pati6TFqzPlZaI08o.88a1e98775f215fb08b58c2fde28b38acebc5f4556c8eb850b9ca9930dbcf607"
 AIRTABLE_BASE_ID = "appRIlSL63Kxh6iWX"
 
-# Точные названия таблиц из документации Baza 2026
+# Названия таблиц из документации Baza 2026
 TABLE_ORDERS = "Закупка"
 TABLE_CARGO = "Логистика Карго"
-TABLE_DELIVERY = "Доставка в РФ" 
-
-# Инструкция для китайского фулфилмента
-SYSTEM_MSG_NAMING = (
-    "Ты — эксперт по логистике в Китае. Твоя задача — создать имя файла для китайского фулфилмента. "
-    "Формат СТРОГО: [Описание на китайском]_[Description in English]_[Размер]_[Артикул]_[Штрихкод]. "
-    "В описании ОБЯЗАТЕЛЬНО укажи: что это за товар, его ЦВЕТ и МАТЕРИАЛ (или тип набора), чтобы рабочий на складе не перепутал товары. "
-    "Пример: 棕色虎纹套装_BrownTigerSet_M_880002359_2049595583930. "
-    "Если размера нет, ставь '-'. Выдай только одну строку текста, без лишних слов, без расширения .pdf."
-)
+TABLE_DELIVERY = "Доставка в РФ"
 
 # --- ФУНКЦИИ ИИ ---
 async def ask_kimi(prompt: str, image_b64: str = None, system_msg: str = "Ты ассистент.") -> str:
     headers = {'Authorization': f'Bearer {KIMI_API_KEY}', 'Content-Type': 'application/json'}
     model = 'moonshot-v1-8k-vision-preview' if image_b64 else 'moonshot-v1-8k'
     content = [{'type': 'text', 'text': prompt}]
+    
     if image_b64:
         content.append({'type': 'image_url', 'image_url': {'url': f'data:image/jpeg;base64,{image_b64}'}})
+        
     messages = [{'role': 'system', 'content': system_msg}, {'role': 'user', 'content': content}]
     
     try:
@@ -56,19 +48,23 @@ async def ask_kimi(prompt: str, image_b64: str = None, system_msg: str = "Ты �
                 return f"Error_{resp.status}"
     except Exception as e:
         logger.error(f"Kimi API Error: {e}")
-        return "❌ Ошибка соединения с ИИ."
+        return f"❌ Ошибка соединения с ИИ: {e}"
 
+# --- ИЗВЛЕЧЕНИЕ ДАННЫХ С КАРТИНКИ ---
 async def extract_image_data(image: Image.Image):
     barcode_num, text, article = "-", "-", "-"
+    
     try:
         codes = decode(image.convert('L'))
         if codes: barcode_num = codes[0].data.decode('utf-8')
-    except: pass
-    
+    except Exception as e:
+        logger.error(f"Ошибка чтения штрихкода: {e}")
+        
     try:
         text = pytesseract.image_to_string(image, lang='rus+eng+chi_sim', config=r'--oem 3 --psm 6')
-    except: pass
-    
+    except Exception as e:
+        logger.error(f"Ошибка OCR: {e}")
+        
     for pattern in [r'Артикул[:\s]+(\w+)', r'Артикул[:\s]*(\w+)', r'Article[:\s]+(\w+)']:
         match = re.search(pattern, text, re.IGNORECASE)
         if match: 
@@ -77,7 +73,7 @@ async def extract_image_data(image: Image.Image):
             
     return barcode_num, text, article
 
-# --- ЖЕСТКАЯ ЗАПИСЬ В AIRTABLE (БЕЗ ИИ) ---
+# --- AIRTABLE ЛОГИКА ---
 async def write_to_airtable(data: dict, data_type: str = "EXPORT"):
     api = Api(AIRTABLE_TOKEN)
     def fmt_date(d):
@@ -138,13 +134,13 @@ async def write_to_airtable(data: dict, data_type: str = "EXPORT"):
                 table.create(record, typecast=True)
                 return f"✅ Карго: Партия {data.get('Party_ID')} добавлена!"
                 
-        return "❌ Ошибка: Тип данных не определен или отсутствуют нужные ключи."
+        return "❌ Ошибка: Тип данных не определен или ключи не совпадают."
         
     except Exception as e:
         logger.error(f"Airtable Record Creation Error: {e}")
-        return f"❌ Ошибка записи в Airtable: Проверьте точное совпадение названий полей. Детали: {e}"
+        return f"❌ Ошибка записи в Airtable:\n<code>{e}</code>"
 
-# --- ОБРАБОТЧИКИ ТЕЛЕГРАМ ---
+# --- ОБРАБОТЧИКИ ТЕКСТА ---
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text
     if not text: return
@@ -184,13 +180,15 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text(status)
         return
 
-    # Если текст не является системным блоком — общаемся с Kimi
+    # Обычное общение с ИИ
     resp = await ask_kimi(text)
     await update.message.reply_text(resp[:4000])
 
+# --- ОБРАБОТЧИКИ ФОТО И ДОКУМЕНТОВ ---
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     caption = update.message.caption or ""
     
+    # Поддержка и фото, и документов (файлов)
     if update.message.photo:
         file_id = update.message.photo[-1].file_id
     elif update.message.document:
@@ -201,54 +199,142 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     file = await context.bot.get_file(file_id)
     buf = BytesIO()
     await file.download_to_memory(buf)
+    
     img_b64 = base64.b64encode(buf.getvalue()).decode('utf-8')
     image = Image.open(buf)
 
-    if caption.startswith('/1688'):
+    # 1. АНАЛИЗ ПОСТАВЩИКА (/1688)
+    if caption.lower().startswith('/1688'):
         msg = await update.message.reply_text("⏳ Анализирую поставщика...")
-        res = await ask_kimi("Supplier Info CN/EN. Tax ID, Address, Phone. Code blocks.", image_b64=img_b64, system_msg="1688 Expert.")
-        await msg.edit_text(res, parse_mode='Markdown')
-        
-    elif caption.startswith('/hs'):
+        try:
+            prompt_1688 = """Извлеки информацию о компании. Выведи ответ СТРОГО в следующем формате:
+
+📝 SUPPLIER CARD (1688)
+
+🏢 **Company (CN):**
+`[Название на китайском]`
+
+🏢 **Company (EN):**
+`[Название на английском]`
+
+📋 **Tax ID:**
+`[Единый код / Tax ID]`
+
+📍 **Address (CN):**
+`[Адрес на китайском]`
+
+📍 **Address (EN):**
+`[Адрес на английском]`
+
+📞 **Phone:**
+`[Телефон, если нет, напиши '未知']`"""
+            res = await ask_kimi(prompt_1688, image_b64=img_b64, system_msg="Ты бизнес-ассистент по закупкам в Китае.")
+            await msg.edit_text(res, parse_mode='Markdown')
+        except Exception as e:
+            await msg.edit_text(f"❌ Ошибка 1688: {e}")
+
+    # 2. ПОДБОР КОДОВ ТН ВЭД (/hs)
+    elif caption.lower().startswith('/hs'):
         msg = await update.message.reply_text("⏳ Подбираю коды ТН ВЭД...")
-        res = await ask_kimi(f"HS Code 4/6/10 digits. Info: {caption}", image_b64=img_b64, system_msg="Customs Broker.")
-        codes = re.findall(r'\b\d{4,10}\b', res)
-        links = "\n\n🔍 **Alta.ru:**\n" + "\n".join([f"👉 [Код {c}](https://www.alta.ru/tnved/code/{c}/)" for c in set(codes)])
-        await msg.edit_text(res + links, parse_mode='Markdown', disable_web_page_preview=True)
-        
+        try:
+            prompt_hs = """Посмотри на товар на фото, определи, что это, и предложи 3 подходящих кода ТН ВЭД (10 знаков). Формат:
+
+📦 **Коды ТН ВЭД:**
+
+Для товара на фотографии...
+
+1. [Код 1] - [Описание]
+2. [Код 2] - [Описание]
+3. [Код 3] - [Описание]"""
+            res = await ask_kimi(prompt_hs, image_b64=img_b64, system_msg="Ты таможенный брокер.")
+            
+            # Ищем коды для создания ссылок
+            codes = re.findall(r'\b\d{4,10}\b', res)
+            links = "\n\n🔍 **Проверить в базе Alta:**\n" + "\n".join([f"👉 [Код {c}](https://www.alta.ru/tnved/code/{c}/)" for c in set(codes)])
+            
+            await msg.edit_text(res + links, parse_mode='Markdown', disable_web_page_preview=True)
+        except Exception as e:
+            await msg.edit_text(f"❌ Ошибка HS: {e}")
+
+    # 3. ЭТИКЕТКИ, ШТРИХКОДЫ И PDF (Для склада)
     else:
         msg = await update.message.reply_text("⏳ Читаю штрихкод и генерирую файл...")
-        barcode, ocr_text, art = await extract_image_data(image)
-        
-        prompt = (
-            f"Текст с этикетки: {ocr_text}. Артикул: {art}. Штрихкод: {barcode}. "
-            f"Внимательно изучи текст и выдели ГЛАВНОЕ для китайского рабочего: что за товар, какой цвет и материал/набор. "
-            f"Сформируй имя файла строго по шаблону."
-        )
-        
-        new_name_raw = await ask_kimi(prompt, image_b64=img_b64, system_msg=SYSTEM_MSG_NAMING)
-        final_name = re.sub(r'[\\/*?:"<>|]', '', new_name_raw.strip()) + ".pdf"
-        
-        pdf_buf = BytesIO()
-        image.convert('RGB').save(pdf_buf, format='PDF', resolution=100.0)
-        pdf_buf.seek(0)
-        
-        await msg.delete()
-        await context.bot.send_document(
-            chat_id=update.effective_chat.id,
-            document=InputFile(pdf_buf, filename=final_name),
-            caption=f"✅ **Готово для склада!**\n\n📄 Имя файла:\n`{final_name}`\n\nBarcode: {barcode}\nArt: {art}",
-            parse_mode='Markdown'
-        )
+        try:
+            barcode, ocr_text, art = await extract_image_data(image)
+            
+            prompt_label = f"""Текст с этикетки: {ocr_text}. Артикул: {art}. Штрихкод: {barcode}.
+Внимательно изучи текст и выдели ГЛАВНОЕ.
 
+⚠️ ПРАВИЛО: Китайская часть имени ОБЯЗАТЕЛЬНО должна содержать: Суть товара + Цвет + Материал (или название набора).
+
+Сформируй ответ СТРОГО по шаблону ниже:
+
+FILENAME: [Китай_ТоварЦветМатериалНабор]_[Англ_ТоварЦветМатериалНабор]_[Размер]
+ITEM_RU: [Название товара на русском]
+COLOR_RU: [Цвет и материал/набор на русском]
+ITEM_EN: [Название товара на английском]
+COLOR_EN: [Цвет и материал/набор на английском]
+
+Если размера нет, ставь '-' в FILENAME."""
+
+            raw_res = await ask_kimi(prompt_label, image_b64=img_b64, system_msg="Ты логист китайского склада. Отвечай только по шаблону.")
+
+            # Парсинг ответа
+            filename_base, item_ru, color_ru, item_en, color_en = "Товар", "-", "-", "-", "-"
+            for line in raw_res.split('\n'):
+                line = line.strip()
+                if line.startswith('FILENAME:'): filename_base = line.replace('FILENAME:', '').strip()
+                elif line.startswith('ITEM_RU:'): item_ru = line.replace('ITEM_RU:', '').strip()
+                elif line.startswith('COLOR_RU:'): color_ru = line.replace('COLOR_RU:', '').strip()
+                elif line.startswith('ITEM_EN:'): item_en = line.replace('ITEM_EN:', '').strip()
+                elif line.startswith('COLOR_EN:'): color_en = line.replace('COLOR_EN:', '').strip()
+
+            # Создание безопасного имени файла
+            final_name = f"{filename_base}_{art}_{barcode}.pdf"
+            final_name = re.sub(r'[\\/*?:"<>|]', '', final_name) 
+
+            # Конвертация в PDF
+            pdf_buf = BytesIO()
+            image.convert('RGB').save(pdf_buf, format='PDF', resolution=100.0)
+            pdf_buf.seek(0)
+
+            # Безопасная HTML-ссылка на Wildberries
+            wb_link = f" 👉 <a href='https://www.wildberries.ru/search?search={art}'>https://www.wildberries.ru/search?search={art}</a>" if art != "-" else ""
+
+            # Идеальный дизайн сообщения как на скриншоте (HTML)
+            msg_text = (
+                f"📦 <b>Страниц:</b> 1\n"
+                f"✅ <b>Штрих-код:</b> {barcode}\n"
+                f"✅ <b>Артикул:</b> {art}{wb_link}\n"
+                f"📝 <b>Детали с этикетки:</b>\n"
+                f"🔶 Товар: {item_ru}\n"
+                f"🔶 Цвет/Материал: {color_ru}\n"
+                f"🔶 Товар (EN): {item_en}\n"
+                f"🔶 Цвет (EN): {color_en}"
+            )
+
+            await msg.delete()
+            
+            # Отправка документа
+            await context.bot.send_document(
+                chat_id=update.effective_chat.id,
+                document=InputFile(pdf_buf, filename=final_name),
+                caption=msg_text,
+                parse_mode='HTML' # <-- Решает проблему с нижними подчеркиваниями
+            )
+        except Exception as e:
+            logger.error(f"Ошибка PDF: {e}")
+            await msg.edit_text(f"❌ <b>Ошибка при обработке PDF:</b>\n<code>{e}</code>", parse_mode='HTML')
+
+# --- МЕНЮ И ЗАПУСК ---
 async def show_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     menu_text = (
         "<b>📂 Меню GS Assistant:</b>\n\n"
         "1️⃣ <b>/paste [данные]</b> - перенос расчета в шаблон\n"
-        "2️⃣ <b>/1688 [фото]</b> - инфо о поставщике с картинки\n"
-        "3️⃣ <b>/hs [фото]</b> - подбор кодов ТН ВЭД\n"
+        "2️⃣ <b>/1688 [в подписи к фото]</b> - инфо о поставщике с картинки\n"
+        "3️⃣ <b>/hs [в подписи к фото]</b> - подбор 3 кодов ТН ВЭД\n"
         "4️⃣ <b>Просто фото/файл этикетки</b> - создает PDF для склада\n"
-        "5️⃣ <b>Пересылка блоков Airtable</b> - Автоматически распознает блок Закупки, Карго или Доставки и занесет в базу."
+        "5️⃣ <b>Экспорт данных (Airtable)</b> - автоматически читает блоки <code>AIRTABLE_EXPORT_START</code> и <code>AIRTABLE_DOSTAVKA_START</code>."
     )
     await update.message.reply_text(menu_text, parse_mode='HTML')
 
@@ -261,9 +347,11 @@ def main():
         BotCommand("paste", "Конвертер /calc")
     ]
     
-    app.add_handler(CommandHandler("start", lambda u, c: u.message.reply_text("🤖 Бот запущен! Нажми /menu")))
+    app.add_handler(CommandHandler("start", lambda u, c: u.message.reply_text("🤖 GS Assistant готов! Нажми /menu")))
     app.add_handler(CommandHandler("menu", show_menu))
+    
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
+    # Бот ловит и картинки, и отправленные документы
     app.add_handler(MessageHandler(filters.PHOTO | filters.Document.IMAGE, handle_photo))
     
     async def set_commands(application):
