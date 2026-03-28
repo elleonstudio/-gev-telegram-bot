@@ -6,9 +6,8 @@ import aiohttp
 from io import BytesIO
 from datetime import datetime
 
-from telegram import Update, InputFile, BotCommand
+from telegram import Update, BotCommand
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
-from pdf2image import convert_from_bytes
 from PIL import Image
 import pytesseract
 from pyzbar.pyzbar import decode
@@ -64,7 +63,7 @@ async def extract_image_data(image: Image.Image):
         if match: article = match.group(1); break
     return barcode_num, text, article
 
-# --- AIRTABLE ЛОГИКА ---
+# --- AIRTABLE ---
 
 async def write_to_airtable(data: dict, data_type: str = "EXPORT"):
     api = Api(AIRTABLE_TOKEN)
@@ -114,51 +113,56 @@ async def write_to_airtable(data: dict, data_type: str = "EXPORT"):
         }
         table.create(record, typecast=True)
         return f"✅ Карго партия {data.get('Party_ID')} добавлена!"
-    return "❌ Ошибка типа данных."
 
-# --- ЛОГИКА АУДИТА (БЕЗ МЫСЛЕЙ ВСЛУХ) ---
+# --- АУДИТ ---
 
 async def run_audit(update: Update, text: str):
+    pure_text = text.replace('/audit_gs', '').strip()
     system_audit = (
-        "Ты — идеальный финансовый аудитор. Ответ ВСЕГДА начинай строго с заголовка /audit_gs.\n\n"
-        "ПРАВИЛА:\n"
-        "1. НЕ ПИШИ свои размышления ('Рассчитаем строку' и т.д.). Считай все молча.\n"
-        "2. Сначала ПОЛНОСТЬЮ выведи оригинальный текст пользователя без изменений.\n"
-        "3. Пересчитай каждую строку (A × B + C). Если итог совпадает (даже без .00) — это ПРАВИЛЬНО.\n"
-        "4. КУРС: ищи в тексте, иначе используй 58. КОМИССИЯ: +10000 или +%.\n\n"
-        "ДИЗАЙН ОТВЕТА (СТРОГО):\n"
-        "Если ВСЁ ВЕРНО:\n"
-        "/audit_gs\n\n{ОРИГИНАЛЬНЫЙ ТЕКСТ}\n\n✅ Ошибок нет, финальная сумма [X]֏ верна.\n\n"
-        "Если ОШИБКИ ЕСТЬ:\n"
-        "/audit_gs\n\n{ОРИГИНАЛЬНЫЙ ТЕКСТ}\n\n❌ Найдены ошибки в расчетах!\n\n"
-        "Строка:\nБыло: [X]\nПравильно: [Y]\n\nСумма:\nБыло: [X]֏\nПравильно: [Y]֏\n\n"
-        "Расхождение: [Z]֏\n\n✅ Исправленный расчет:\n{ПОЛНЫЙ БЛОК ДЛЯ КОПИРОВАНИЯ}\n\n"
-        "Соблюдай все пустые строки между блоками."
+        "Ты — финансовый аудитор. Ответ ВСЕГДА начинай строго с заголовка /audit_gs.\n\n"
+        "1. НЕ ПИШИ свои размышления. Считай молча.\n"
+        "2. ЗАПРЕЩЕНО использовать LaTeX \\[ \\].\n"
+        "3. Сначала ПОЛНОСТЬЮ выведи оригинальный текст пользователя.\n"
+        "Если ВСЁ ВЕРНО: выведи текст + '✅ Ошибок нет, финальная сумма [X]֏ верна.'\n"
+        "Если ОШИБКИ: выведи текст + '❌ Найдены ошибки в расчетах!', блоки 'Строка:', 'Сумма:', 'Расхождение:' и '✅ Исправленный расчет:'."
     )
-    res = await ask_kimi(text, system_msg=system_audit)
+    res = await ask_kimi(pure_text, system_msg=system_audit)
     await update.message.reply_text(res)
 
-# --- ОБРАБОТЧИКИ ---
+# --- МЕНЮ И ОБРАБОТЧИКИ ---
+
+async def show_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = (
+        "<b>📂 Функции GS Orders:</b>\n\n"
+        "1️⃣ <code>/audit_gs [текст]</code> — Проверка расчетов (по твоему дизайну)\n"
+        "2️⃣ <code>/paste [текст]</code> — Конвертер в шаблон /calc\n"
+        "3️⃣ <b>Фото этикетки</b> — Имя файла для фулфилмента (с иероглифами)\n"
+        "4️⃣ <code>/1688 [фото]</code> — Поиск поставщика\n"
+        "5️⃣ <code>/hs [фото]</code> — Коды ТН ВЭД\n"
+        "6️⃣ <b>Airtable</b> — Авто-запись (Выкуп, Карго, Доставка РФ)\n"
+        "7️⃣ <code>/cancel</code> — Отмена текущей операции"
+    )
+    await update.message.reply_text(text, parse_mode='HTML')
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text
     if not text: return
 
-    if text.lower() in ['/cancel', 'cancel', 'отмена']:
-        await update.message.reply_text("⛔ Операция отменена.")
-        return
-
-    # Авто-детект Аудита (×, +, =, ֏, ¥)
-    if any(char in text for char in ['×', '*', '+', '=']) and ('֏' in text or '¥' in text):
+    if text.startswith('/audit_gs'):
         await run_audit(update, text)
         return
-
+    
     if text.startswith('/paste'):
         raw = text.replace('/paste', '').strip()
         res = await ask_kimi(raw, system_msg="Конвертер в /calc. Курс 58/55.")
         await update.message.reply_text(res)
         return
 
+    if text.lower() in ['/cancel', 'cancel', 'отмена']:
+        await update.message.reply_text("⛔ Операция отменена.")
+        return
+
+    # Airtable теги
     for tag, t_type in [("AIRTABLE_EXPORT_START", "EXPORT"), ("AIRTABLE_DOSTAVKA_START", "DOSTAVKA")]:
         if tag in text:
             match = re.search(f"{tag}(.*?){tag.replace('START', 'END')}", text, re.DOTALL)
@@ -178,36 +182,25 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     img_b64 = base64.b64encode(buf.getvalue()).decode('utf-8')
 
     if caption.startswith('/1688'):
-        res = await ask_kimi("Supplier Info CN/EN.", image_b64=img_b64, system_msg="1688 Expert.")
+        res = await ask_kimi("Supplier Info.", image_b64=img_b64, system_msg="1688 Expert.")
         await update.message.reply_text(res)
     elif caption.startswith('/hs'):
-        res = await ask_kimi("Suggest 3 HS Codes.", image_b64=img_b64, system_msg="Broker.")
-        codes = re.findall(r'\b\d{4,10}\b', res)
-        links = "\n\n🔍 Alta.ru:\n" + "\n".join([f"👉 [Код {c}](https://www.alta.ru/tnved/code/{c}/)" for c in set(codes)])
-        await update.message.reply_text(res + links, parse_mode='Markdown', disable_web_page_preview=True)
+        res = await ask_kimi("HS Codes.", image_b64=img_b64, system_msg="Broker.")
+        await update.message.reply_text(res)
     else:
         barcode, ocr, art = await extract_image_data(Image.open(buf))
-        name = await ask_kimi(f"Naming: {ocr}. Art: {art}. Barcode: {barcode}.", image_b64=img_b64, system_msg=SYSTEM_MSG_NAMING)
+        name = await ask_kimi(f"Naming: {ocr}.", image_b64=img_b64, system_msg=SYSTEM_MSG_NAMING)
         final = re.sub(r'[\\/*?:"<>|]', '', name.strip()) + ".pdf"
-        await update.message.reply_text(f"✅ Для склада:\n📄 `{final}`\n\nШтрихкод: {barcode}\nАрт: {art}")
+        await update.message.reply_text(f"✅ Для склада:\n📄 `{final}`\n\nBarcode: {barcode}\nArt: {art}")
 
 def main():
     app = Application.builder().token(TELEGRAM_TOKEN).build()
     
-    commands = [
-        BotCommand("start", "Запустить"),
-        BotCommand("menu", "Функции"),
-        BotCommand("paste", "Конвертер /calc")
-    ]
-    
-    app.add_handler(CommandHandler("start", lambda u, c: u.message.reply_text("🤖 Бот GS Orders готов!")))
+    app.add_handler(CommandHandler("start", lambda u, c: u.message.reply_text("🤖 Бот готов! Нажми /menu")))
+    app.add_handler(CommandHandler("menu", show_menu))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
     
-    async def set_commands(application):
-        await application.bot.set_my_commands(commands)
-    
-    app.post_init = set_commands
     app.run_polling(drop_pending_updates=True)
 
 if __name__ == '__main__':
