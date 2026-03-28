@@ -131,51 +131,31 @@ async def write_to_airtable(data: dict):
 
 # --- ОБРАБОТЧИКИ ---
 
-async def handle_audit(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    text = update.message.text
-    raw_input = text.replace('/audit', '', 1).strip()
+async def perform_audit(update: Update, raw_input: str):
+    msg = await update.message.reply_text("⏳ Выполняю аудит расчетов...")
     
-    if not raw_input:
-        await update.message.reply_text("Отправь данные после команды /audit")
-        return
-
-    msg = await update.message.reply_text("⏳ Выполняю точный математический аудит...")
-    
-    # НОВЫЙ БРОНЕБОЙНЫЙ ШАБЛОН ДЛЯ ИИ
     system_audit = (
-        "Ты — точнейший финансовый калькулятор-аудитор. Твоя задача — проверить математику пользователя БЕЗ ОКРУГЛЕНИЙ.\n"
-        "СЧИТАЙ СТРОГО ПО ШАГАМ! Пример: 7.5 × 200 + 144. Шаг 1: 7.5*200=1500. Шаг 2: 1500+144=1644.\n\n"
-        "Формулы:\n"
-        "1. Товар: (Цена × Количество) + Доставка = Итог\n"
-        "2. Общая сумма: (Сумма всех итогов) × 58 = База\n"
-        "3. Финальная сумма: База + Доп. расходы = Итого ֏\n\n"
-        "ВЫДАЙ ОТВЕТ СТРОГО ПО ЭТОМУ ШАБЛОНУ (НИКАКИХ СЛОВ 'ЧАСТЬ 1' или 'ЧАСТЬ 2'):\n\n"
-        "❌ Найдены ошибки в расчетах! (Или '✅ Ошибок нет')\n"
-        "Строка: Было [что написал юзер] -> Правильно [твой точный расчет]\n"
-        "💸 Расхождение: [Разница в драмах] ֏\n"
-        "===SPLIT===\n"
+        "Ты — строгий финансовый аудитор. Твоя задача проверить расчеты пользователя и выдать ОДНО сообщение СТРОГО по шаблону ниже.\n"
+        "Пересчитай всё дважды: (Цена × Кол-во) + Доставка = Итог строки.\n\n"
+        "ОБЯЗАТЕЛЬНО соблюдай этот формат символ в символ (не пиши лишних слов):\n\n"
         "/audit-gs\n"
-        "[Оригинальный текст пользователя с исправленными цифрами]"
+        "[Оригинальный текст пользователя 1 в 1]\n\n"
+        "❌ Найдены ошибки в расчетах! (или ✅ Ошибок нет)\n\n"
+        "Строка:\n"
+        "Было: [ошибочная строка из оригинала]\n"
+        "Правильно: [исправленная строка]\n\n"
+        "Сумма:\n"
+        "Было: [ошибочная финальная сумма пользователя]\n"
+        "Правильно: [твоя правильная сумма]\n"
+        "💸 Расхождение: [разница в драмах] ֏\n\n"
+        "✅ Исправленный расчет:\n"
+        "[Исправленный текст пользователя целиком (с правильными итогами и суммами)]\n\n"
+        "ПРАВИЛО: Если ошибок нет, пропусти блоки 'Строка', 'Сумма' и 'Расхождение', просто выведи текст пользователя и напиши '✅ Ошибок нет'."
     )
     
     try:
         res = await ask_kimi(f"Проверь этот расчет:\n{raw_input}", system_msg=system_audit)
-        
-        # Разрезаем ответ и удаляем мусор, если ИИ все же написал "ЧАСТЬ"
-        if "===SPLIT===" in res:
-            parts = res.split("===SPLIT===")
-            analysis = parts[0].replace("ЧАСТЬ 1 (Анализ):", "").replace("ЧАСТЬ 1", "").strip()
-            corrected_text = parts[1].replace("ЧАСТЬ 2 (Чистый текст для копирования):", "").replace("ЧАСТЬ 2", "").strip()
-            
-            # Убеждаемся, что начинается с /audit-gs
-            if not corrected_text.startswith("/audit-gs"):
-                corrected_text = "/audit-gs\n" + corrected_text
-                
-            await msg.edit_text(analysis)
-            await update.message.reply_text(corrected_text)
-        else:
-            await msg.edit_text(f"⚠️ Ошибка формата ответа от ИИ, но вот результат:\n\n{res}")
-            
+        await msg.edit_text(res.strip())
     except Exception as e:
         await msg.edit_text(f"❌ Ошибка ИИ: {e}")
 
@@ -196,7 +176,7 @@ async def handle_paste(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "2. Количество: 200 (число после знака 'x')\n"
         "3. Цена клиенту: 7.5 (самое первое число)\n"
         "4. Доставка: 144 (число после знака '+')\n"
-        "ИГНОРИРУЙ любые итоги (например, 1644, 153260).\n\n"
+        "ИГНОРИРУЙ любые итоги.\n\n"
         "ФОРМАТ ОТВЕТА СТРОГО ТАКОЙ:\n"
         "/calc\n\n"
         "Клиент: [Имя клиента из первой строки]\n\n"
@@ -224,6 +204,8 @@ async def handle_paste(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text
     if not text: return
+    
+    # Игнорируем команды и вывод самого бота
     if text.strip().startswith('/calc'): return
     if text.strip().startswith('/audit-gs'): return
 
@@ -241,6 +223,13 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text(status)
         return
 
+    # АВТОМАТИЧЕСКИЙ АУДИТ: 
+    # Если в тексте есть перемножение (x или ×), плюс (+) и равно (=)
+    if re.search(r'\d+(\.\d+)?\s*[x×X]\s*\d+', text) and '=' in text and '+' in text and '\n' in text:
+        await perform_audit(update, text)
+        return
+
+    # Обычное общение с ИИ
     resp = await ask_kimi(text)
     await update.message.reply_text(resp[:4000])
 
@@ -270,14 +259,12 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def show_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     menu_text = (
         "<b>📂 Меню GS Orders Bot:</b>\n\n"
-        "1️⃣ <b>/paste [данные]</b> - перенос расчета в подробный шаблон /calc\n"
-        "2️⃣ <b>/audit [расчет]</b> - 🔍 перепроверка математики и расхождений\n"
+        "1️⃣ <b>Авто-Аудит</b> - просто перешли любой расчет с математикой, бот сам его проверит!\n"
+        "2️⃣ <b>/paste [данные]</b> - перенос расчета в подробный шаблон /calc\n"
         "3️⃣ <b>/1688 [фото]</b> - инфо о поставщике с картинки\n"
         "4️⃣ <b>/hs [фото]</b> - подбор кодов ТН ВЭД\n"
         "5️⃣ <b>Просто фото этикетки</b> - формирует китайское имя файла\n"
-        "6️⃣ <b>Экспорт данных (Airtable)</b>:\n"
-        "  • <code>AIRTABLE_EXPORT_START</code> (Выкуп / Логистика)\n"
-        "  • <code>AIRTABLE_DOSTAVKA_START</code> (Доставка по РФ)"
+        "6️⃣ <b>Экспорт (Airtable)</b>: перешли блок AIRTABLE_EXPORT"
     )
     await update.message.reply_text(menu_text, parse_mode='HTML')
 
@@ -287,14 +274,14 @@ def main():
     commands = [
         BotCommand("start", "Запустить"),
         BotCommand("menu", "Показать все функции"),
-        BotCommand("paste", "Конвертер /calc"),
-        BotCommand("audit", "Проверить математику")
+        BotCommand("paste", "Конвертер /calc")
     ]
     
     app.add_handler(CommandHandler("start", lambda u, c: u.message.reply_text("🤖 Бот готов! Нажми /menu")))
     app.add_handler(CommandHandler("menu", show_menu))
     app.add_handler(MessageHandler(filters.Regex(r'^/paste(\s|$)'), handle_paste))
-    app.add_handler(MessageHandler(filters.Regex(r'^/audit(\s|$)'), handle_audit))
+    
+    # Больше нет команды /audit — она работает автоматически внутри handle_text
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
     app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
     
