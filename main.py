@@ -355,5 +355,9 @@ def main():
     app.post_init = set_commands
     app.run_polling(drop_pending_updates=True)
 
+app.add_handler(CommandHandler("start", lambda u, c: u.message.reply_text("🤖 GS Assistant готов! Нажми /menu")))
+    app.add_handler(CommandHandler("menu", show_menu))
+    app.add_handler(CommandHandler("cancel", lambda u, c: u.message.reply_text("❌ Действие отменено. Жду новых команд.")))
+
 if __name__ == '__main__':
     main()
